@@ -83,23 +83,23 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
 ;; the -LARGE- tests use GEN-INTEGER to generate elements, which makes generation relatively fast, to
 ;; compensate for the much larger data being generated and processed.
 
-(defun max-length-at-depth (depth)
-  (+ (vec::max-body-length-at-depth depth)
+(defun max-length-at-height (height)
+  (+ (vec::max-body-length-at-height height)
      vec::+branch-rate+)) ; the max tail length
 
-(defparameter *gen-length-of-depth-2-or-3*
-  (gen-integer :min (1+ (max-length-at-depth 1))
-               :max (max-length-at-depth 3)))
+(defparameter *gen-length-of-height-2-or-3*
+  (gen-integer :min (1+ (max-length-at-height 1))
+               :max (max-length-at-height 3)))
 
 (def-test round-trip-large-integer-lists (:suite immutable-vec-suite)
-  (for-all ((list (gen-list :length *gen-length-of-depth-2-or-3*)))
+  (for-all ((list (gen-list :length *gen-length-of-height-2-or-3*)))
     (let* ((vec (vec:from-list list)))
       (is-each-element vec in list =)
       (is (equal list (vec:to-list vec)))
       (sync-test-dribble))))
 
 (def-test round-trip-large-integer-vectors (:suite immutable-vec-suite)
-  (for-all ((vector (gen-simple-vector :length *gen-length-of-depth-2-or-3*
+  (for-all ((vector (gen-simple-vector :length *gen-length-of-height-2-or-3*
                                        :elements (gen-integer :min -10 :max 10))))
     (let* ((vec (vec:from-vector vector)))
       (is-each-element vec in-vector vector =)
