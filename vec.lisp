@@ -895,7 +895,7 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
     (setf (aref vector idx) (advance gen))
     (finally (return vector))))
 
-(declaim (ftype (function (vec) (values vector &optional))
+(declaim (ftype (function (vec) (values simple-vector &optional))
                 to-vector))
 (defun to-vector (vec)
   (to-specialized-vector vec :element-type t
