@@ -144,9 +144,7 @@ element; lambda lists will be applied to all the values of each element."
 
 (declaim (ftype (function (generator
                            &key (:element-type t)
-                            (:length-hint array-length)
-                            (:fill-pointer (or boolean array-length))
-                            (:adjustable boolean))
+                            (:length-hint array-length))
                           (values vector &optional))
                 collect-to-vector)
          (inline collect-to-vector))
