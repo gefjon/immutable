@@ -230,27 +230,34 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
              :index idx)
       (unsafe-ref vec idx)))
 
-;;; computing required size, shape, depth of new vecs
+;;; computing required size, shape, height of new vecs
 
-(declaim (ftype (function (length) (values depth &optional))
-                length-required-depth)
-         (inline length-required-depth))
-(defun length-required-depth (length)
-  (case length
-    ((0 1) 0)
-    (t (values (floor (log (1- length) +branch-rate+))))))
+(declaim (ftype (function (length) (values length &optional))
+                length-without-tail-buf)
+         (inline length-without-tail-buf))
+(defun length-without-tail-buf (total-length)
+  (let* ((tail-length (rem total-length +branch-rate+)))
+    (- total-length tail-length)))
 
-(declaim (ftype (function (depth) (values length &optional))
-                elts-per-node-at-depth)
-         (inline elts-per-node-at-depth))
-(defun elts-per-node-at-depth (depth)
-  (expt +branch-rate+ (1+ depth)))
+(declaim (ftype (function (length) (values height &optional))
+                length-required-height)
+         (inline length-required-height))
+(defun length-required-height (length &aux (length-without-tail (length-without-tail-buf length)))
+  (if (<= length-without-tail 1)
+      0
+      (values (floor (log (1- length-without-tail) +branch-rate+)))))
 
-(declaim (ftype (function (length depth) (values length &optional))
-                length-in-nodes-at-depth)
-         (inline length-in-nodes-at-depth))
-(defun length-in-nodes-at-depth (length-in-elts depth)
-  (values (ceiling length-in-elts (elts-per-node-at-depth depth))))
+(declaim (ftype (function (height) (values length &optional))
+                elts-per-node-at-height)
+         (inline elts-per-node-at-height))
+(defun elts-per-node-at-height (height)
+  (expt +branch-rate+ (1+ height)))
+
+(declaim (ftype (function (length height) (values length &optional))
+                trie-length-in-nodes-at-height)
+         (inline trie-length-in-nodes-at-height))
+(defun trie-length-in-nodes-at-height (length-in-elts height)
+  (values (ceiling length-in-elts (elts-per-node-at-height height))))
 
 (declaim (ftype (function (fixnum fixnum fixnum) (values fixnum &optional))
                 bracket)
