@@ -2,7 +2,8 @@
   (:use :cl :fiveam :iterate)
   (:import-from :alexandria
                 #:once-only #:with-gensyms)
-  (:local-nicknames (#:vec :immutable/vec)))
+  (:local-nicknames (#:vec :immutable/vec)
+                    (#:gen :immutable/%generator)))
 (in-package :immutable/test/vec)
 
 (def-suite immutable-vec-suite)
@@ -122,3 +123,25 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
     (signals vec:out-of-bounds
       (vec:ref vec (vec:length vec)))
     (sync-test-dribble)))
+
+;;; testing the EXTEND operator
+
+(def-test extend-like-append-small-list (:suite immutable-vec-suite)
+  (for-all ((start (gen-list :length (gen-integer :min 0 :max 128) :elements (gen-element)))
+            (end (gen-list :length (gen-integer :min 0 :max 128) :elements (gen-element))))
+    (let* ((start-vec (apply #'vec:vec start))
+           (whole-vec (apply #'vec:extend start-vec end))
+           (whole-list (append start end)))
+      (is-each-element whole-vec in whole-list eql)
+      (is (equal whole-list (vec:to-list whole-vec)))
+      (sync-test-dribble))))
+
+(def-test extend-like-concatenate-small-vector (:suite immutable-vec-suite)
+  (for-all ((start (gen-simple-vector :length (gen-integer :min 0 :max 128)))
+            (end (gen-simple-vector :length (gen-integer :min 0 :max 128))))
+    (let* ((start-vec (vec:from-vector start))
+           (whole-vec (vec::extend-from-generator start-vec (gen:generate-vector end) (length end)))
+           (whole-vector (concatenate 'vector start end)))
+      (is-each-element whole-vec in-vector whole-vector eql)
+      (is (equalp whole-vector (vec:to-vector whole-vec)))
+      (sync-test-dribble))))

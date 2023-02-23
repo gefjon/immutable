@@ -26,7 +26,7 @@ shadow CL symbols liberally to accomplish this.
   - [x] constructor analogous to `list` and `vector` - `vec`
   - [x] append one to end - `conj` (consider renaming)
   - [ ] pop one from end
-  - [ ] append multiple to end - `extend`
+  - [x] append multiple to end - `extend`
   - [ ] remove multiple from end
   - [ ] convenient iteration constructs
     - [ ] `map` - apply function to each element, collect result to new `vec`

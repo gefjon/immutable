@@ -14,6 +14,7 @@
    #:ref
    #:length
    #:conj
+   #:extend
    #:from-list #:to-list
    #:from-vector #:to-specialized-vector #:to-vector))
 (in-package :immutable/vec)
@@ -66,6 +67,9 @@ Height of N means that the current node's elements have height (1- N)."
   `(or ,@(iter (declare (declare-variables))
            (for (the array-length i) from 1 to +branch-rate+)
            (collect `(simple-vector ,i)))))
+
+(deftype full-node ()
+  `(simple-vector ,+branch-rate+))
 
 ;; constructing nodes
 
@@ -439,6 +443,283 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
                      :body (grow-trie body tail height length)
                      :tail (vector new-element))))))
 
+(declaim (ftype (function (height full-node generator length) (values node &optional))
+                fill-behind-direct-child))
+(defun fill-behind-direct-child (direct-child-height leading-direct-child follow-elts length-in-elts)
+  "Make a trie that starts with the LEADING-DIRECT-CHILD, then filled from the FOLLOW-ELTS.
+
+Allocate a node with height (1+ DIRECT-CHILD-HEIGHT) whose first child is LEADING-DIRECT-CHILD, and with
+subsequent children to hold enough elements taken from the FOLLOW-ELTS that the node's total length is
+LENGTH-IN-ELTS.
+
+LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of LEADING-DIRECT-CHILD."
+  (alloc-node (concat (generate-these leading-direct-child)
+                      (child-nodes-generator direct-child-height
+                                             (- length-in-elts +branch-rate+)
+                                             follow-elts))
+              (trie-length-in-nodes-at-height length-in-elts direct-child-height)))
+
+(declaim (ftype (function (height full-node height generator length) (values node &optional))
+                fill-behind-node-to-height))
+(defun fill-behind-node-to-height (total-height leading-node leading-node-height follow-elts length-in-elts)
+  "Make a trie of TOTAL-HEIGHT that starts with the LEADING-NODE, then filled from the FOLLOW-ELTS.
+
+LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of LEADING-NODE."
+  (cond ((= total-height leading-node-height) leading-node)
+
+        ((= total-height (1+ leading-node-height))
+         (fill-behind-direct-child leading-node-height leading-node follow-elts length-in-elts))
+
+        (t
+         (let* ((direct-child-height (1- total-height))
+                (direct-leading-child-length (max-body-length-at-height direct-child-height))
+                (leading-direct-child (fill-behind-node-to-height direct-child-height
+                                                                  leading-node
+                                                                  leading-node-height
+                                                                  follow-elts
+                                                                  direct-leading-child-length)))
+           (fill-behind-direct-child direct-child-height
+                                     leading-direct-child
+                                     follow-elts
+                                     length-in-elts)))))
+
+(declaim (ftype (function (height node height full-node generator length) (values node &optional))
+                extend-full-body-to-new-height))
+(defun extend-full-body-to-new-height (new-height full-body old-height full-tail new-elements new-body-length)
+  (if (= new-height (1+ old-height))
+      (let* ((node-with-tail-length-in-elts (min (max-body-length-at-height old-height)
+                                                 new-body-length))
+             (new-nodes-length-in-elts (- new-body-length node-with-tail-length-in-elts)))
+        (alloc-node (concat (generate-these full-body
+                                            (fill-behind-node-to-height old-height
+                                                                        full-tail
+                                                                        0
+                                                                        new-elements
+                                                                        node-with-tail-length-in-elts))
+                            (child-nodes-generator old-height
+                                                   new-nodes-length-in-elts
+                                                   new-elements))
+                    new-body-length))
+
+      (let* ((one-more-height (1+ old-height))
+             (leading-node-length-in-elts (max-body-length-at-height one-more-height))
+             (leading-node (extend-full-body-to-new-height one-more-height
+                                                           full-body
+                                                           old-height
+                                                           full-tail
+                                                           new-elements
+                                                           leading-node-length-in-elts)))
+        (fill-behind-node-to-height new-height leading-node one-more-height new-elements new-body-length))))
+
+(declaim (ftype (function (node height length &optional index) (values generator &optional))
+                generate-trie))
+(defun generate-trie (trie height length-in-elts &optional (start-at 0))
+  (let* ((next-idx start-at))
+    (declare (length next-idx))
+    (lambda ()
+      (if (>= next-idx length-in-elts)
+          (done)
+          (prog1 (trieref trie height next-idx)
+            (incf next-idx))))))
+
+(declaim (ftype (function (node height length generator length) (values node &optional))
+                extend-node-at-height))
+(defun extend-node-at-height (not-full-node height current-length-in-elts new-elements target-length-in-elts)
+  (let* ((child-height (1- height))
+         (elts-per-full-child (elts-per-node-at-height child-height))
+         (num-full-leading-children (floor current-length-in-elts elts-per-full-child))
+         (partial-child-p (not (= num-full-leading-children (cl:length not-full-node))))
+         (length-in-children (trie-length-in-nodes-at-height target-length-in-elts
+                                                             child-height)))
+    (declare (height child-height)
+             (length elts-per-full-child)
+             (node-length num-full-leading-children
+                          length-in-children))
+    (if (not partial-child-p)
+        ;; If all our children are full, this operation is easy: construct a new node which has all of the
+        ;; existing children, followed by new nodes taken from the NEW-ELEMENTS.
+        (alloc-node (concat (generate-vector not-full-node)
+                            (child-nodes-generator child-height
+                                                   (- target-length-in-elts current-length-in-elts)
+                                                   new-elements))
+                    length-in-children)
+
+        ;; If we have a partial child, things get a little trickier. The resulting node will have 3 parts, and
+        ;; unfortunately, we'll have to do some math to compute each one.
+
+        ;; 1. Any full direct children of NOT-FULL-NODE can be inserted as children of the new node without
+        ;; copying.
+
+        ;; 2. The NOT-FULL-NODE has exactly one child which is not full; recurse to extend it as far as
+        ;;    possible from the NEW-ELEMENTS.
+
+        ;; 3. If there are more than enough NEW-ELEMENTS to fill 2 entirely, some entirely new nodes taken
+        ;;    from the NEW-ELEMENTS.
+        (let* ((full-leading-children-length-in-elts (* elts-per-full-child num-full-leading-children))
+               (partial-existing-child-length-in-elts (- current-length-in-elts
+                                                         full-leading-children-length-in-elts))
+               (new-elts-to-fill-partial-existing-child (- elts-per-full-child
+                                                           partial-existing-child-length-in-elts))
+               (available-new-elts (- target-length-in-elts current-length-in-elts))
+               (filled-partial-existing-child-length-in-elts (min elts-per-full-child
+                                                                  (+ partial-existing-child-length-in-elts
+                                                                     available-new-elts)))
+               (new-children-length-in-elts (- target-length-in-elts
+                                               full-leading-children-length-in-elts
+                                               new-elts-to-fill-partial-existing-child)))
+          (declare (length full-leading-children-length-in-elts
+                           partial-existing-child-length-in-elts
+                           new-elts-to-fill-partial-existing-child
+                           available-new-elts
+                           filled-partial-existing-child-length-in-elts
+                           new-children-length-in-elts))
+          (alloc-node (concat (take (generate-vector not-full-node) num-full-leading-children)
+                              (generate-these (extend-node-at-height (svref not-full-node num-full-leading-children)
+                                                                     child-height
+                                                                     partial-existing-child-length-in-elts
+                                                                     new-elements
+                                                                     filled-partial-existing-child-length-in-elts))
+                              (child-nodes-generator child-height
+                                                     new-children-length-in-elts
+                                                     new-elements))
+                      length-in-children)))))
+
+(declaim (ftype (function (height node height length generator length)
+                          (values node &optional))
+                extend-partial-node-to-new-height))
+(defun extend-partial-node-to-new-height (new-height
+                                          partial-node
+                                          current-height
+                                          current-length-in-elts
+                                          new-elements
+                                          target-length-in-elts)
+  (let* (;; we know that we will be filling the PARTIAL-NODE all the way, that is, that FULL-NODE-LENGTH is
+         ;; less than TARGET-LENGTH-IN-ELTS, because NEW-HEIGHT > CURRENT-HEIGHT.
+         (full-node-length (elts-per-node-at-height current-height))
+         (full-node (extend-node-at-height partial-node
+                                           current-height
+                                           current-length-in-elts
+                                           new-elements
+                                           full-node-length)))
+    (fill-behind-node-to-height new-height full-node current-height new-elements target-length-in-elts)))
+
+(declaim (ftype (function (tail-buf) (values generator &optional))
+                generate-tail)
+         (inline generate-tail))
+(defun generate-tail (tail-buf)
+  (if tail-buf
+      (generate-vector tail-buf)
+      (lambda () (done))))
+
+(declaim (ftype (function (vec generator length) (values vec &optional))
+                extend-from-generator))
+(defun extend-from-generator (vec new-elements added-length)
+  (with-accessors ((height %vec-height)
+                   (length %vec-length)
+                   (tail %vec-tail)
+                   (body %vec-body))
+      vec
+    (let* ((new-length (+ length added-length))
+           (new-height (length-required-height new-length))
+           (new-body-length (length-without-tail-buf new-length))
+           (new-tail-length (- new-length new-body-length)))
+      (declare (length new-length new-body-length)
+               (height new-height)
+               (tail-length new-tail-length))
+      (cond ((and (not tail)
+                  (< added-length +branch-rate+))
+             ;; no tail and new items fit in tail: grow a tail
+             (copy-vec vec
+                       :length new-length
+                       :tail (make-tail added-length new-elements)))
+
+            ((< (+ added-length (tail-length vec)) +branch-rate+)
+             ;; have tail, but new elements will fit in it
+             (copy-vec vec
+                       :length new-length
+                       :tail (make-tail (the tail-length (+ added-length (tail-length vec)))
+                                        (concat (generate-tail tail) new-elements))))
+
+            ((and (not body)
+                  (= (tail-length vec) +branch-rate+))
+             ;; no body, full tail: fold tail buf into body, then grow from new-elements.
+             (%make-vec :height new-height
+                        :length new-length
+                        :body (fill-behind-node-to-height new-height tail 0 new-elements new-length)
+                        :tail (make-tail new-tail-length new-elements)))
+
+            ((not body)
+             ;; no body, tail not full: construct vec from elements of old tail and new elements
+             (%make-vec :length new-length
+                        :height new-height
+                        :body (alloc-trie new-height
+                                          new-body-length
+                                          (concat (generate-tail tail) new-elements))
+                        :tail (make-tail new-tail-length new-elements)))
+
+            ((and (= (body-length vec) (max-body-length-at-height height))
+                  (= (cl:length tail) +branch-rate+))
+             ;; tail and body are both full: grow one or more extra layers of height, move your old tail buf
+             ;; into your newly-expanded body, distribute new-elements between body and new tail.
+             (%make-vec :height new-height
+                        :length new-length
+                        :body (extend-full-body-to-new-height new-height
+                                                              body
+                                                              height
+                                                              tail
+                                                              new-elements
+                                                              new-body-length)
+                        :tail (make-tail new-tail-length new-elements)))
+
+            ((= (body-length vec) (max-body-length-at-height height))
+             ;; body is full, tail is not: grow to new height, distribute elements from old tail and
+             ;; NEW-ELEMENTS between extended body and new tail
+             (%make-vec :height new-height
+                        :length new-length
+                        :body (fill-behind-node-to-height new-height
+                                                          body
+                                                          height
+                                                          (concat (generate-tail tail)
+                                                                  new-elements)
+                                                          new-body-length)
+                        :tail (make-tail new-tail-length new-elements)))
+
+            ;; TODO: missed case: not full body, full tail. small win possible by sharing structure with
+            ;; existing tail buf.
+
+            ((= height new-height)
+             ;; body is not full, but do not need to grow additional height: distribute elements from your old
+             ;; tail and the NEW-ELEMENTS between body and new tail.
+             (%make-vec :height height
+                        :length new-length
+                        :body (extend-node-at-height body
+                                                     height
+                                                     (body-length vec)
+                                                     (concat (generate-tail tail)
+                                                             new-elements)
+                                                     new-body-length)
+                        :tail (make-tail new-tail-length new-elements)))
+
+            (t
+             ;; body is not full; need to grow additional height to fit new elements
+             (%make-vec :height new-height
+                        :length new-length
+                        :body (extend-partial-node-to-new-height new-height
+                                                                 body
+                                                                 height
+                                                                 (body-length vec)
+                                                                 (concat (generate-tail tail)
+                                                                         new-elements)
+                                                                 new-body-length)
+                        :tail (make-tail new-tail-length new-elements)))))))
+
+(declaim (ftype (function (vec &rest t) (values vec &optional))
+                extend)
+         (inline extend))
+(defun extend (vec &rest new-elements)
+  (declare (dynamic-extent new-elements))
+  (extend-from-generator vec (generate-list new-elements) (cl:length new-elements)))
+
 ;;; easy constructor
 
 (declaim (ftype (function (&rest t) (values vec &optional))
@@ -492,7 +773,7 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
          (body (%vec-body vec))
          (tail (%vec-tail vec)))
     (cond ((and (null body) (null tail)) (lambda () (done)))
-          ((null body) (generate-vector tail))
+          ((null body) (generate-tail tail))
           (:else (generator (;; are we in the tail, and what is the next tail element to yield?
                              (tail-idx nil)
 
