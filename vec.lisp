@@ -154,13 +154,19 @@ arguments `:element-type', `:adjustable' and `:fill-pointer' analogous to `make-
 
 ;;; length computations
 
+(declaim (ftype (function (tail-buf) (values tail-length &optional))
+                tail-buf-length)
+         (inline tail-buf-length))
+(defun tail-buf-length (tail-buf)
+  (if tail-buf
+      (cl:length tail-buf)
+      0))
+
 (declaim (ftype (function (vec) (values tail-length &optional))
                 tail-length)
          (inline tail-length))
-(defun tail-length (vec &aux (tail (%vec-tail vec)))
-  (if tail
-      (cl:length tail)
-      0))
+(defun tail-length (vec)
+  (tail-buf-length (%vec-tail vec)))
 
 (declaim (ftype (function (vec) (values length &optional))
                 length body-length)
@@ -658,7 +664,7 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                         :tail (make-tail new-tail-length new-elements)))
 
             ((and (= (body-length vec) (max-body-length-at-height height))
-                  (= (cl:length tail) +branch-rate+))
+                  (= (tail-buf-length tail) +branch-rate+))
              ;; tail and body are both full: grow one or more extra layers of height, move your old tail buf
              ;; into your newly-expanded body, distribute new-elements between body and new tail.
              (%make-vec :height new-height
