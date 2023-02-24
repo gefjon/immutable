@@ -24,10 +24,11 @@ shadow CL symbols liberally to accomplish this.
   - [x] convert from CL sequences - `from-list` and `from-vector`
   - [x] convert to CL sequences - `to-list` and `to-vector`
   - [x] constructor analogous to `list` and `vector` - `vec`
-  - [x] append one to end - `conj` (consider renaming)
+  - [x] append one to end - `push-back`
   - [ ] pop one from end
   - [x] append multiple to end - `extend`
   - [ ] remove multiple from end
+  - [ ] replace element at given index - `replace-at`
   - [ ] convenient iteration constructs
     - [ ] `map` - apply function to each element, collect result to new `vec`
     - [ ] `for-each` - apply function to each element, discard result
@@ -39,7 +40,7 @@ shadow CL symbols liberally to accomplish this.
     - [ ] representation for transient ids
     - [ ] make `vec` transient - `transient!`
     - [ ] make transient persistent - `persistent`
-    - [ ] append one to end - `conj!` (consider renaming)
+    - [ ] append one to end - `push-back!`
     - [ ] pop one from end
     - [ ] append multiple to end - `extend!`
     - [ ] remove multiple from end

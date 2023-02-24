@@ -107,11 +107,11 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
       (is (equalp vector (vec:to-vector vec)))
       (sync-test-dribble))))
 
-;;; testing the CONJ operator
+;;; testing the PUSH-BACK operator
 
-(def-test reduce-conj-like-from-vector-small (:suite immutable-vec-suite)
+(def-test reduce-push-back-like-from-vector-small (:suite immutable-vec-suite)
   (for-all ((vector (gen-simple-vector)))
-    (let* ((by-reduce (reduce #'vec:conj vector :initial-value vec:+empty+)))
+    (let* ((by-reduce (reduce #'vec:push-back vector :initial-value vec:+empty+)))
       (is-each-element by-reduce in-vector vector eql)
       (is (equalp vector (vec:to-vector by-reduce)))
       (sync-test-dribble))))

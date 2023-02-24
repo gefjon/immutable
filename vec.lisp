@@ -13,7 +13,7 @@
    #:unsafe-ref
    #:ref
    #:length
-   #:conj
+   #:push-back
    #:extend
    #:from-list #:to-list
    #:from-vector #:to-specialized-vector #:to-vector))
@@ -362,8 +362,8 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
       t))
 
 (declaim (ftype (function (simple-vector t) (values simple-vector &optional))
-                sv-conj))
-(defun sv-conj (vector new-element
+                sv-push-back))
+(defun sv-push-back (vector new-element
                 &aux (new-vector (make-array (1+ (cl:length vector)))))
   (iter (declare (declare-variables))
     (for elt in-vector vector with-index idx)
@@ -413,8 +413,16 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
                        new-length-in-nodes)))))
 
 (declaim (ftype (function (vec t) (values vec &optional))
-                conj))
-(defun conj (vec new-element)
+                push-back))
+(defun push-back (vec new-element)
+  "Return a new `vec' like VEC, with NEW-ELEMENT added to the end.
+
+Attempts to share as much structure as possible with the original VEC.
+
+# Time complexity
+
+This operation has an amortized runtime of O(1). One out of every `+branch-rate+' `push-back's will run in
+O(log_{+brach-rate+}N) time in the length of the input VEC, and the rest will run in constant time."
   (with-accessors ((height %vec-height)
                    (length %vec-length)
                    (tail %vec-tail)
@@ -428,7 +436,7 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
           ((tail-has-room-p tail)
            ;; fast path when your tail is short: make it longer
            (copy-vec vec
-                     :tail (sv-conj tail new-element)
+                     :tail (sv-push-back tail new-element)
                      :length (1+ length)))
           ((= (body-length vec) (max-body-length-at-height height))
            ;; fast path when your tail and body are both full: grow an extra layer of height, put your old tail
@@ -723,6 +731,19 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                 extend)
          (inline extend))
 (defun extend (vec &rest new-elements)
+  "Return a new `vec' with all the contents of VEC followed by the NEW-ELEMENTS.
+
+This operation will attempt to share as much structure as possible with the original VEC.
+
+# Time complexity
+
+Let N be the number of elements in VEC, and M be the number of NEW-ELEMENTS.
+
+For M < +BRANCH-RATE+, this operation's amortized time complexity is O((M * log_{+branch-rate+}N) /
++branch-rate+), because every (+branch-rate+ / M) `extend's will overflow the tail buffer and require
+log_{+branch-rate+}N operations to splice it into the body.
+
+For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-rate+}N)."
   (declare (dynamic-extent new-elements))
   (extend-from-generator vec (generate-list new-elements) (cl:length new-elements)))
 
