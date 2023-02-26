@@ -44,6 +44,23 @@ shadow CL symbols liberally to accomplish this.
     - [ ] pop one from end
     - [ ] append multiple to end - `extend!`
     - [ ] remove multiple from end
+  - [ ] [trivial-extensible-sequences](https://shinmera.github.io/trivial-extensible-sequences/) integration
+    - [ ] define `vec` as a `standard-class` subclassing `sequences:sequence`
+      - [ ] use `standard-instance-access` when available to optimize slot access
+    - [ ] method on `sequences:length` which calls `length`
+    - [ ] method on `sequences:elt` which calls `ref`
+    - [ ] method on `make-simple-sequence-iterator`
+      - [ ] method on `iterator-element`
+      - [ ] method on `iterator-step`
+      - [ ] method on `iterator-endp`
+      - [ ] method on `iterator-element`
+      - [ ] method on `iterator-index`
+      - [ ] method on `iterator-copy`
+    - [ ] method on `concatenate` when RESULT-PROTOTYPE and the first sequence are `vec`s
+          to share structure with the first sequence
+    - [ ] no-op method on `copy-seq`
+    - [ ] method on `emptyp`
+    - [ ] method on `map`
 - [ ] `map` - hash array mapped tries
   - [ ] type definition
     - [ ] generic over hash and equality functions
@@ -71,3 +88,4 @@ shadow CL symbols liberally to accomplish this.
     - [ ] add multiple pairs?
     - [ ] remove one pair
     - [ ] remove multiple pairs?
+  - [ ] integration with trivial-extensible-sequences?
