@@ -9,8 +9,10 @@
            #:done
            #:advance
            #:generate-list
+           #:with-list-generator
            #:generate-these
            #:generate-vector
+           #:with-vector-generator
            #:generate-constantly
            #:do-generator
            #:collect-to-list
@@ -56,7 +58,7 @@ VARS are treated as in `let*'."
   :test (constantly t) ;; no useful way to compare generators, so just don't incompatibly redefine this lmao
   )
 
-(declaim (ftype (function (list) (values generator  &optional))
+(declaim (ftype (function (list) (values generator &optional))
                 generate-list)
          (inline generate-list))
 (defun generate-list (list)
@@ -64,6 +66,22 @@ VARS are treated as in `let*'."
   (generator ((next list))
     (if next (pop next)
         (done))))
+
+(declaim (ftype (function (list (function (generator) (values &rest t)))
+                          (values &rest t))
+                call-with-list-generator)
+         (inline call-with-list-generator))
+(defun call-with-list-generator (list thunk)
+  (let* ((next list))
+    (flet ((generator ()
+             (if next
+                 (pop next)
+                 (done))))
+      (declare (dynamic-extent #'generator))
+      (funcall thunk #'generator))))
+
+(defmacro with-list-generator ((generator-binding list) &body body)
+  `(call-with-list-generator ,list (lambda (,generator-binding) ,@body)))
 
 (declaim (ftype (function (&rest t) (values generator &optional))
                 generate-these)
@@ -95,6 +113,24 @@ new elements, or do other weird stuff."
     (if (< i (length vec)) (prog1 (aref vec i)
                              (incf i))
         (done))))
+
+(declaim (ftype (function (vector (function (generator) (values &rest t)))
+                          (values &rest t))
+                call-with-vector-generator)
+         (inline call-with-vector-generator))
+(defun call-with-vector-generator (vector thunk)
+  (let* ((next-idx 0))
+    (declare (type array-index next-idx))
+    (flet ((generator ()
+             (if (< next-idx (length vector))
+                 (prog1 (aref vector next-idx)
+                   (incf next-idx))
+                 (done))))
+      (declare (dynamic-extent #'generator))
+      (funcall thunk #'generator))))
+
+(defmacro with-vector-generator ((generator-binding vector) &body body)
+  `(call-with-vector-generator ,vector (lambda (,generator-binding) ,@body)))
 
 (declaim (ftype (function (t) (values generator &optional))
                 generate-constantly)

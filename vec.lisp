@@ -403,26 +403,28 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
   (cond ((zerop height) new-node)
         ((null trie) (wrap-in-spine height new-node))
         (t
-         (let* ((length-before-in-elts (- new-length-in-elts (cl:length new-node)))
-                (elts-per-node (elts-per-node-at-height (1- height)))
-                (new-length-in-nodes (ceiling new-length-in-elts
-                                              elts-per-node))
-                (length-before-in-nodes (floor length-before-in-elts
-                                               elts-per-node))
-                (last-node-length-in-nodes (- new-length-in-nodes length-before-in-nodes)))
-           (declare (node-length new-length-in-nodes
-                                 length-before-in-nodes
-                                 last-node-length-in-nodes))
-           (alloc-node (concat (take (generate-vector trie) length-before-in-nodes)
-                               (generate-these (if (= length-before-in-nodes (cl:length trie))
-                                                   ;; new node is the leftmost in its subtree
-                                                   (wrap-in-spine (1- height) new-node)
-                                                   ;; new node has siblings
-                                                   (grow-trie (svref trie length-before-in-nodes)
-                                                              new-node
-                                                              (1- height)
-                                                              last-node-length-in-nodes))))
-                       new-length-in-nodes)))))
+         (locally (declare (node trie)) ; for some reason, sbcl doesn't infer this, at least on 2.2.11
+           (let* ((length-before-in-elts (- new-length-in-elts (cl:length new-node)))
+                  (elts-per-node (elts-per-node-at-height (1- height)))
+                  (new-length-in-nodes (ceiling new-length-in-elts
+                                                elts-per-node))
+                  (length-before-in-nodes (floor length-before-in-elts
+                                                 elts-per-node))
+                  (last-node-length-in-nodes (- new-length-in-nodes length-before-in-nodes)))
+             (declare (node-length new-length-in-nodes
+                                   length-before-in-nodes
+                                   last-node-length-in-nodes))
+             (with-vector-generator (trie-generator trie)
+               (alloc-node (concat (take trie-generator length-before-in-nodes)
+                                   (generate-these (if (= length-before-in-nodes (cl:length trie))
+                                                       ;; new node is the leftmost in its subtree
+                                                       (wrap-in-spine (1- height) new-node)
+                                                       ;; new node has siblings
+                                                       (grow-trie (svref trie length-before-in-nodes)
+                                                                  new-node
+                                                                  (1- height)
+                                                                  last-node-length-in-nodes))))
+                           new-length-in-nodes)))))))
 
 (declaim (ftype (function (vec t) (values vec &optional))
                 push-back))
@@ -564,11 +566,12 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
     (if (not partial-child-p)
         ;; If all our children are full, this operation is easy: construct a new node which has all of the
         ;; existing children, followed by new nodes taken from the NEW-ELEMENTS.
-        (alloc-node (concat (generate-vector not-full-node)
-                            (child-nodes-generator child-height
-                                                   (- target-length-in-elts current-length-in-elts)
-                                                   new-elements))
-                    length-in-children)
+        (with-vector-generator (existing-children-generator not-full-node)
+          (alloc-node (concat existing-children-generator
+                              (child-nodes-generator child-height
+                                                     (- target-length-in-elts current-length-in-elts)
+                                                     new-elements))
+                      length-in-children))
 
         ;; If we have a partial child, things get a little trickier. The resulting node will have 3 parts, and
         ;; unfortunately, we'll have to do some math to compute each one.
@@ -599,16 +602,17 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                            available-new-elts
                            filled-partial-existing-child-length-in-elts
                            new-children-length-in-elts))
-          (alloc-node (concat (take (generate-vector not-full-node) num-full-leading-children)
-                              (generate-these (extend-node-at-height (svref not-full-node num-full-leading-children)
-                                                                     child-height
-                                                                     partial-existing-child-length-in-elts
-                                                                     new-elements
-                                                                     filled-partial-existing-child-length-in-elts))
-                              (child-nodes-generator child-height
-                                                     new-children-length-in-elts
-                                                     new-elements))
-                      length-in-children)))))
+          (with-vector-generator (existing-children-generator not-full-node)
+            (alloc-node (concat (take existing-children-generator num-full-leading-children)
+                                (generate-these (extend-node-at-height (svref not-full-node num-full-leading-children)
+                                                                       child-height
+                                                                       partial-existing-child-length-in-elts
+                                                                       new-elements
+                                                                       filled-partial-existing-child-length-in-elts))
+                                (child-nodes-generator child-height
+                                                       new-children-length-in-elts
+                                                       new-elements))
+                        length-in-children))))))
 
 (declaim (ftype (function (height node height length generator length)
                           (values node &optional))
@@ -800,12 +804,13 @@ For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-ra
            (multiple-value-bind (new-last-child new-tail new-last-child-height)
                (pop-last-node-from-body (svref body num-copied-children)
                                         child-height)
-             (values (alloc-node (concat (take (generate-vector body) num-copied-children)
-                                         (generate-these (wrap-in-spine (- child-height new-last-child-height)
-                                                                        new-last-child)))
-                                 num-children)
-                     new-tail
-                     height))))))
+             (with-vector-generator (children-generator body)
+               (values (alloc-node (concat (take children-generator num-copied-children)
+                                           (generate-these (wrap-in-spine (- child-height new-last-child-height)
+                                                                          new-last-child)))
+                                   num-children)
+                       new-tail
+                       height)))))))
 
 (declaim (ftype (function (vec) (values vec t &optional))
                 pop-back))
@@ -838,7 +843,8 @@ For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-ra
                 vec))
 (defun vec (&rest elts)
   (declare (dynamic-extent elts))
-  (generator-vec (cl:length elts) (generate-list elts)))
+  (with-list-generator (generator elts)
+    (generator-vec (cl:length elts) generator)))
 
 ;;; equality comparison
 
@@ -982,12 +988,14 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
 (declaim (ftype (function (vector) (values vec &optional))
                 from-vector))
 (defun from-vector (vector)
-  (generator-vec (cl:length vector) (generate-vector vector)))
+  (with-vector-generator (elements vector)
+    (generator-vec (cl:length vector) elements)))
 
 (declaim (ftype (function (list) (values vec &optional))
                 from-list))
 (defun from-list (list)
-  (generator-vec (cl:length list) (generate-list list)))
+  (with-list-generator (elements list)
+    (generator-vec (cl:length list) elements)))
 
 (declaim (ftype (function (vec) (values list &optional))
                 to-list))
@@ -1005,6 +1013,11 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
 (defun to-specialized-vector (vec &key (element-type t)
                                         fill-pointer
                                         adjustable)
+  "Convert VEC into a `vector', accepting `:element-type', `:fill-pointer' and `:adjustable' keyword arguments as to `make-array'.
+
+`:fill-pointer' is extended to accept `t', in addition to its usual values of `nil' or an
+`array-index'. Supplying `:fill-pointer t' sets the fill-pointer of the resulting vector to be equal to its
+length. `:adjustable t' should likely also be supplied in this case."
   (iter (declare (declare-variables))
     (with vector = (make-array (length vec)
                                :element-type element-type
@@ -1015,7 +1028,12 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
                                :adjustable adjustable))
     (with gen = (generate-vec vec))
     (for idx below (length vec))
-    (setf (aref vector idx) (advance gen))
+    (for next-elt = (advance gen))
+    (assert (typep next-elt element-type) (next-elt)
+            'type-error
+            :expected-type element-type
+            :datum next-elt)
+    (setf (aref vector idx) next-elt)
     (finally (return vector))))
 
 (declaim (ftype (function (vec) (values simple-vector &optional))
