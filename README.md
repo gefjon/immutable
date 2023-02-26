@@ -25,7 +25,7 @@ shadow CL symbols liberally to accomplish this.
   - [x] convert to CL sequences - `to-list` and `to-vector`
   - [x] constructor analogous to `list` and `vector` - `vec`
   - [x] append one to end - `push-back`
-  - [ ] pop one from end
+  - [x] pop one from end
   - [x] append multiple to end - `extend`
   - [ ] remove multiple from end
   - [ ] replace element at given index - `replace-at`
@@ -34,7 +34,7 @@ shadow CL symbols liberally to accomplish this.
     - [ ] `for-each` - apply function to each element, discard result
     - [ ] `do` - macro analogous to `dolist`
     - [ ] `iterate` integration?
-  - [ ] equality testing
+  - [x] equality testing - `equal`
   - [ ] hashing?
   - [ ] transients - see [Jean Niklas L'orange's blog post](https://hypirion.com/musings/understanding-clojure-transients)
     - [ ] representation for transient ids

@@ -2,7 +2,7 @@
   (:import-from :alexandria
                 #:array-index #:array-length #:define-constant #:when-let)
   (:use :cl :iterate #:immutable/%generator)
-  (:shadow #:length)
+  (:shadow #:length #:equal)
   (:export
    #:out-of-bounds
    #:out-of-bounds-index
@@ -15,6 +15,8 @@
    #:length
    #:push-back
    #:extend
+   #:pop-back
+   #:equal
    #:from-list #:to-list
    #:from-vector #:to-specialized-vector #:to-vector))
 (in-package :immutable/vec)
@@ -152,6 +154,14 @@ arguments `:element-type', `:adjustable' and `:fill-pointer' analogous to `make-
                      (out-of-bounds-length c)
                      (out-of-bounds-vec c)))))
 
+;;; condition class for pop-back from empty
+
+(define-condition pop-back-empty (error)
+  ()
+  (:report (lambda (c s)
+             (declare (ignore c))
+             (write-string "Attempt to POP-BACK from empty VEC" s))))
+
 ;;; length computations
 
 (declaim (ftype (function (tail-buf) (values tail-length &optional))
@@ -288,8 +298,8 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
 (defun alloc-trie (height length-in-elts contents)
   (cond ((zerop length-in-elts) nil)
         ((zerop height) (alloc-node contents length-in-elts))
-        (:otherwise (alloc-node (child-nodes-generator (1- height) length-in-elts contents)
-                                (trie-length-in-nodes-at-height length-in-elts (1- height))))))
+        (:else (alloc-node (child-nodes-generator (1- height) length-in-elts contents)
+                           (trie-length-in-nodes-at-height length-in-elts (1- height))))))
 
 (defun child-nodes-generator (child-height length-in-elts contents)
   (generator ((per-child-length (elts-per-node-at-height child-height))
@@ -324,13 +334,15 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
 (declaim (ftype (function (length generator) (values vec &optional))
                 generator-vec))
 (defun generator-vec (length contents)
-  (let* ((body-length (length-without-tail-buf length))
-         (tail-length (- length body-length))
-         (height (length-required-height body-length)))
-    (%make-vec :height height
-               :length length
-               :body (alloc-trie height body-length contents)
-               :tail (make-tail tail-length contents))))
+  (if (zerop length)
+      +empty+
+      (let* ((body-length (length-without-tail-buf length))
+             (tail-length (- length body-length))
+             (height (length-required-height body-length)))
+        (%make-vec :height height
+                   :length length
+                   :body (alloc-trie height body-length contents)
+                   :tail (make-tail tail-length contents)))))
 
 ;;; internal functional updates to vecs
 
@@ -380,9 +392,9 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
 (declaim (ftype (function (height node) (values node &optional))
                 wrap-in-spine))
 (defun wrap-in-spine (height body)
-  (if (zerop height)
-      body
-      (alloc-node (generate-these body) 1)))
+  (if (plusp height)
+      (wrap-in-spine (1- height) (alloc-node (generate-these body) 1))
+      body))
 
 (declaim (ftype (function ((or null node) node height length)
                           (values node &optional))
@@ -747,6 +759,79 @@ For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-ra
   (declare (dynamic-extent new-elements))
   (extend-from-generator vec (generate-list new-elements) (cl:length new-elements)))
 
+;;; PUSH-BACK and helpers
+
+(declaim (ftype (function (simple-vector) (values (or null simple-vector) t &optional))
+                sv-pop-back))
+(defun sv-pop-back (simple-vector &aux (len (cl:length simple-vector)))
+  (if (zerop len)
+      (error 'pop-back-empty)
+      (let* ((new-len (1- len))
+             (popped-elt (svref simple-vector new-len)))
+        (values (unless (zerop new-len)
+                  (let* ((new-vector (make-array new-len)))
+                    (iter (for i below new-len)
+                      (setf (svref new-vector i) (svref simple-vector i)))
+                    new-vector))
+                popped-elt))))
+
+(declaim (ftype (function (node height) (values (or null node) full-node height &optional))
+                pop-last-node-from-body))
+(defun pop-last-node-from-body (body height)
+  (cond ((zerop height)
+         ;; height is zero: current body becomes tail, resulting body is empty
+         (values nil body 0))
+
+        ((= (cl:length body) 1)
+         ;; only one child: pop from child, decrease height
+         (pop-last-node-from-body (svref body 0) (1- height)))
+
+        ((= height 1)
+         ;; direct children are leaves: do a SV-POP-BACK to extract the last node
+         (multiple-value-bind (new-body new-tail)
+             (sv-pop-back body)
+           (values new-body new-tail height)))
+
+        (:otherwise
+         ;; recurse to remove a tail from your last child
+         (let* ((child-height (1- height))
+                (num-children (cl:length body))
+                (num-copied-children (1- num-children)))
+           (multiple-value-bind (new-last-child new-tail new-last-child-height)
+               (pop-last-node-from-body (svref body num-copied-children)
+                                        child-height)
+             (values (alloc-node (concat (take (generate-vector body) num-copied-children)
+                                         (generate-these (wrap-in-spine (- child-height new-last-child-height)
+                                                                        new-last-child)))
+                                 num-children)
+                     new-tail
+                     height))))))
+
+(declaim (ftype (function (vec) (values vec t &optional))
+                pop-back))
+(defun pop-back (vec)
+  (with-accessors ((tail %vec-tail)
+                   (body %vec-body)
+                   (length %vec-length)
+                   (height %vec-height))
+      vec
+    (cond ((zerop length) (error 'pop-back-empty))
+          (tail (multiple-value-bind (new-tail popped-element)
+                    (sv-pop-back tail)
+                  (values (copy-vec vec
+                                    :length (1- length)
+                                    :tail new-tail)
+                          popped-element)))
+          (:else (multiple-value-bind (new-body full-tail new-height)
+                     (pop-last-node-from-body body height)
+                   (multiple-value-bind (new-tail popped-element)
+                       (sv-pop-back full-tail)
+                     (values (%make-vec :height new-height
+                                        :length (1- length)
+                                        :tail new-tail
+                                        :body new-body)
+                             popped-element)))))))
+
 ;;; easy constructor
 
 (declaim (ftype (function (&rest t) (values vec &optional))
@@ -754,6 +839,23 @@ For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-ra
 (defun vec (&rest elts)
   (declare (dynamic-extent elts))
   (generator-vec (cl:length elts) (generate-list elts)))
+
+;;; equality comparison
+
+(declaim (ftype (function (vec vec
+                               &optional (or symbol (function (t t) (values t &rest t))))
+                          (values boolean &optional))
+                equal)
+         (inline equal))
+(defun equal (left right &optional (elt-equal #'eql))
+  (and (= (length left) (length right))
+       (let* ((left-gen (generate-vec left))
+              (right-gen (generate-vec right)))
+         (iter (declare (declare-variables))
+           (repeat (length left))
+           (unless (funcall elt-equal (advance left-gen) (advance right-gen))
+             (return-from equal nil))
+           (finally (return-from equal t))))))
 
 ;;; printing vecs
 

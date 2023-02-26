@@ -62,6 +62,36 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
                   (for ,elt ,in ,sequence)
                   (is (,pred ,elt (vec:ref ,vec ,idx))))))))
 
+(defun is-body-balanced-and-length-in-elts (body height)
+  (if (zerop height)
+      (progn (is (typep body `(simple-vector ,vec::+branch-rate+))
+                 "Expected node of height zero to be a ~a but found ~a"
+                 `(simple-vector ,vec::+branch-rate+)
+                 body)
+             vec::+branch-rate+)
+      (progn
+        (is (typep body 'simple-vector))
+        (is (>= vec::+branch-rate+ (length body)))
+        (iter (for child in-vector body)
+          (summing (is-body-balanced-and-length-in-elts child (1- height)))))))
+
+(defun is-vec-valid (vec)
+  (quietly
+    (let* ((height (vec::%vec-height vec))
+           (body (vec::%vec-body vec))
+           (tail (vec::%vec-tail vec))
+           (length (vec::%vec-length vec))
+           (found-body-length (if body
+                                  (is-body-balanced-and-length-in-elts body height)
+                                  0)))
+      (when tail
+        (is (typep tail 'simple-vector))
+        (is (>= vec::+branch-rate+ (length tail))))
+      (is (= length (+ found-body-length (length tail))))))
+  (write-char #\. *test-dribble*)
+  (sync-test-dribble)
+  vec)
+
 ;;; testing round-trips between CL data structures and vecs
 
 ;; the -SMALL- tests use GEN-ELEMENT of (relatively) arbitrary type, which makes generation somewhat slow.
@@ -70,6 +100,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
   (for-all ((list (gen-list :length (gen-integer :min 16 :max 128)
                             :elements (gen-element))))
     (let* ((vec (vec:from-list list)))
+      (is-vec-valid vec)
       (is-each-element vec in list eql)
       (is (equal list (vec:to-list vec)))
       (sync-test-dribble))))
@@ -77,6 +108,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
 (def-test round-trip-small-vectors (:suite immutable-vec-suite)
   (for-all ((vector (gen-simple-vector)))
     (let* ((vec (vec:from-vector vector)))
+      (is-vec-valid vec)
       (is-each-element vec in-vector vector eql)
       (is (equalp vector (vec:to-vector vec)))
       (sync-test-dribble))))
@@ -95,6 +127,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
 (def-test round-trip-large-integer-lists (:suite immutable-vec-suite)
   (for-all ((list (gen-list :length *gen-length-of-height-2-or-3*)))
     (let* ((vec (vec:from-list list)))
+      (is-vec-valid vec)
       (is-each-element vec in list =)
       (is (equal list (vec:to-list vec)))
       (sync-test-dribble))))
@@ -103,6 +136,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
   (for-all ((vector (gen-simple-vector :length *gen-length-of-height-2-or-3*
                                        :elements (gen-integer :min -10 :max 10))))
     (let* ((vec (vec:from-vector vector)))
+      (is-vec-valid vec)
       (is-each-element vec in-vector vector =)
       (is (equalp vector (vec:to-vector vec)))
       (sync-test-dribble))))
@@ -112,6 +146,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
 (def-test reduce-push-back-like-from-vector-small (:suite immutable-vec-suite)
   (for-all ((vector (gen-simple-vector)))
     (let* ((by-reduce (reduce #'vec:push-back vector :initial-value vec:+empty+)))
+      (is-vec-valid by-reduce)
       (is-each-element by-reduce in-vector vector eql)
       (is (equalp vector (vec:to-vector by-reduce)))
       (sync-test-dribble))))
@@ -120,6 +155,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
 
 (def-test ref-out-of-bounds-error (:suite immutable-vec-suite)
   (for-all ((vec (gen-vec)))
+    (is-vec-valid vec)
     (signals vec:out-of-bounds
       (vec:ref vec (vec:length vec)))
     (sync-test-dribble)))
@@ -132,6 +168,8 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
     (let* ((start-vec (apply #'vec:vec start))
            (whole-vec (apply #'vec:extend start-vec end))
            (whole-list (append start end)))
+      (is-vec-valid start-vec)
+      (is-vec-valid whole-vec)
       (is-each-element whole-vec in whole-list eql)
       (is (equal whole-list (vec:to-list whole-vec)))
       (sync-test-dribble))))
@@ -142,6 +180,28 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
     (let* ((start-vec (vec:from-vector start))
            (whole-vec (vec::extend-from-generator start-vec (gen:generate-vector end) (length end)))
            (whole-vector (concatenate 'vector start end)))
+      (is-vec-valid start-vec)
+      (is-vec-valid whole-vec)
       (is-each-element whole-vec in-vector whole-vector eql)
       (is (equalp whole-vector (vec:to-vector whole-vec)))
       (sync-test-dribble))))
+
+;;; testing the POP-BACK operator
+
+(def-test push-back-pop-back-identity (:suite immutable-vec-suite)
+  (flet ((is-id (vec elt)
+           (is-vec-valid vec)
+           (let* ((pushed (vec:push-back vec elt)))
+             (is-vec-valid vec)
+             (is (eql elt
+                      (vec:ref pushed (1- (vec:length pushed)))))
+             (multiple-value-bind (popped popped-elt)
+                 (vec:pop-back pushed)
+               (is-vec-valid popped)
+               (is (vec:equal vec popped))
+               (is (eql popped-elt elt))))))
+    (is-id (vec:vec) 0)
+    (is-id (vec:vec 0) 1)
+    (for-all ((vec (gen-vec))
+              (next-elt (gen-element)))
+      (is-id vec next-elt))))
