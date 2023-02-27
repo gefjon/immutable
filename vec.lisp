@@ -889,38 +889,6 @@ See `extend' for more information."
   (with-list-generator (generator elts)
     (generator-vec (cl:length elts) generator)))
 
-;;; equality comparison
-
-(declaim (ftype (function (vec vec
-                               &optional (or symbol (function (t t) (values t &rest t))))
-                          (values boolean &optional))
-                equal)
-         ;; Inlining `equal' may allow more efficient calls to ELT-EQUAL.
-         (inline equal))
-(defun equal (left right &optional (elt-equal #'eql))
-  (and (= (length left) (length right))
-       (let* ((left-gen (generate-vec left))
-              (right-gen (generate-vec right)))
-         (iter (declare (declare-variables))
-           (repeat (length left))
-           (unless (funcall elt-equal (advance left-gen) (advance right-gen))
-             (return-from equal nil))
-           (finally (return-from equal t))))))
-
-;;; printing vecs
-
-(defmethod print-object ((vec vec) stream)
-  (when (and *print-readably* (not *read-eval*))
-    (error "Unable to readbly print a VEC when *READ-EVAL* is nil."))
-  (when *print-readably*
-    (write-string "#." stream))
-  (write-string "(vec" stream)
-  (iter (declare (declare-variables))
-    (for i below (the length (length vec)))
-    (write-char #\space stream)
-    (write (ref vec i) :stream stream))
-  (write-string ")" stream))
-
 ;;; generating vecs (for conversions)
 
 (declaim (ftype (function (vector) (values t &optional))
@@ -940,11 +908,12 @@ See `extend' for more information."
   (setf (aref stack (1- (cl:length stack)))
         new-element))
 
-(declaim (ftype (function (vec) (values generator &optional))
-                generate-vec))
-;; CONSIDER: should `generate-vec' be declared inline?
-(defun generate-vec (vec)
-  "A generator which yields the elements of VEC in order. The ADVANCE operation is amortized O(1).
+(symbol-macrolet ((height (%vec-height vec))
+                  (length (%vec-length vec))
+                  (body (%vec-body vec))
+                  (tail (%vec-tail vec)))
+  (define-generator vec ((vec vec))
+                    "A generator which yields the elements of VEC in order. The ADVANCE operation is amortized O(1).
 
 Internally, after checking for a few easy cases (empty vec or tail-only), this allocates two vectors to use as
 stacks: one holding the sequence of nodes to reach a leaf, and the other holding the indices into those
@@ -953,84 +922,115 @@ element to yield, then increments TOP-OF-INDEX-STACK. If that increment overflow
 TOP-OF-NODE-STACK, it pops from each stack, increments the index there to find a new leaf TOP-NODE-OF-STACK,
 and pushes it back to the vector. The pop and repush sequence will happen every +BRANCH-RATE+ elements, and
 involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
-  (let* ((height (%vec-height vec))
-         (body (%vec-body vec))
-         (tail (%vec-tail vec)))
-    (cond ((and (null body) (null tail)) (lambda () (done)))
-          ((null body) (generate-tail tail))
-          (:else (generator (;; are we in the tail, and what is the next tail element to yield?
-                             (tail-idx nil)
+      
+      (;; are we in the tail, and what is the next tail element to yield?
+       (tail-idx (unless (%vec-body vec) 0))
+       ;; the path of nodes we walk to reach the current leaf
+       (node-stack (let* ((stack (make-array (1+ height)
+                                             :fill-pointer 0)))
+                     (vector-push body stack)
+                     (iter (declare (declare-variables))
+                       (repeat height)
+                       (vector-push (svref (stack-peek stack) 0) stack))
+                     stack))
+       ;; the path of indices into those nodes we walk to reach the next element. for
+       ;; all I < Height, (svref (aref NODE-STACK I) (aref INDEX-STACK I)) = (aref
+       ;; NODE-STACK (1+ I)), i.e. the INDEX-STACK holds the index of the node we are
+       ;; currently traversing. for I = HEIGHT, the INDEX-STACK holds the index of the
+       ;; next element to yield.
+       (index-stack (let* ((stack (make-array (1+ height)
+                                              :fill-pointer 0
+                                              :element-type 'node-index)))
+                      (iter (declare (declare-variables))
+                        (repeat (1+ height))
+                        (vector-push 0 stack))
+                      stack)))
+    
+    (declare ((or null tail-length) tail-idx))
+    (labels ((generate-from-tail ()
+               ;; This is a manually inlined `generate-vector' with an additional check for if
+               ;; there is no tail.
+               (if (or (null tail) (>= tail-idx (cl:length (the node ; for some reason, SBCL can't infer this
+                                                                     ; from the previous `null' test.
+                                                                tail))))
+                   (done)
+                   (prog1 (svref tail tail-idx)
+                     (incf tail-idx))))
 
-                             ;; the path of nodes we walk to reach the current leaf
-                             (node-stack (let* ((stack (make-array (1+ height)
-                                                                   :fill-pointer 0)))
-                                           (vector-push body stack)
-                                           (iter (declare (declare-variables))
-                                             (repeat height)
-                                             (vector-push (svref (stack-peek stack) 0) stack))
-                                           stack))
+             (generate-from-body ()
+               ;; We increment after yielding, not before, so on entry here CURRENT-NODE and
+               ;; CURRENT-IDX always refer to a valid next element.
+               (let* ((current-node (stack-peek node-stack))
+                      (current-idx (stack-peek index-stack)))
+                 (prog1 (svref current-node current-idx)
+                   (advance-index current-node current-idx))))
 
-                             ;; the path of indices into those nodes we walk to reach the next element. for
-                             ;; all I < Height, (svref (aref NODE-STACK I) (aref INDEX-STACK I)) = (aref
-                             ;; NODE-STACK (1+ I)), i.e. the INDEX-STACK holds the index of the node we are
-                             ;; currently traversing. for I = HEIGHT, the INDEX-STACK holds the index of the
-                             ;; next element to yield.
-                             (index-stack (let* ((stack (make-array (1+ height)
-                                                                    :fill-pointer 0
-                                                                    :element-type 'node-index)))
-                                            (iter (declare (declare-variables))
-                                              (repeat (1+ height))
-                                              (vector-push 0 stack))
-                                            stack)))
-                   (declare ((or null tail-length) tail-idx))
-                   (labels ((generate-from-tail ()
-                              ;; This is a manually inlined `generate-vector' with an additional check for if
-                              ;; there is no tail.
-                              (if (or (null tail) (>= tail-idx (cl:length tail)))
-                                  (done)
-                                  (prog1 (svref tail tail-idx)
-                                    (incf tail-idx))))
+             (advance-index (current-node current-idx)
+               (let* ((next-idx (1+ current-idx)))
+                 (if (= next-idx (cl:length (the node current-node)))
+                     ;; If NEXT-IDX is not a valid index into CURRENT-NODE, we need to
+                     ;; re-jigger the stack to find a new leaf node.
+                     (advance-to-next-node)
+                     ;; Otherwise, just record the NEXT-IDX and you're done.
+                     (setf (stack-peek index-stack) next-idx))))
 
-                            (generate-from-body ()
-                              ;; We increment after yielding, not before, so on entry here CURRENT-NODE and
-                              ;; CURRENT-IDX always refer to a valid next element.
-                              (let* ((current-node (stack-peek node-stack))
-                                     (current-idx (stack-peek index-stack)))
-                                (prog1 (svref current-node current-idx)
-                                  (advance-index current-node current-idx))))
+             (advance-to-next-node ()
+               ;; On entering here from ADVANCE-INDEX, we know the top of NODE-STACK and
+               ;; INDEX-STACK to be invalid, so get rid of them.
+               (vector-pop node-stack)
+               (vector-pop index-stack)
+               (if (= 0 (cl:length node-stack))
+                   ;; If you're out of nodes, start generating from the tail instead.
+                   (setf tail-idx 0)
+                   ;; Otherwise, recursively get a new next-highest node and index.
+                   (progn
+                     (advance-index (stack-peek node-stack)
+                                    (stack-peek index-stack))
+                     ;; If the recursive call to ADVANCE-INDEX got all the way to the bottom of
+                     ;; the stack and moved into the tail, don't try to continue.
+                     (unless tail-idx
+                       ;; But otherwise, push the next node onto the stack, and start
+                       ;; traversing it at index 0.
+                       (vector-push (svref (stack-peek node-stack) (stack-peek index-stack))
+                                    node-stack)
+                       (vector-push 0 index-stack))))))
+      (if tail-idx
+          (generate-from-tail)
+          (generate-from-body)))))
+(declaim (notinline generate-vec call-with-vec-generator))
 
-                            (advance-index (current-node current-idx)
-                              (let* ((next-idx (1+ current-idx)))
-                                (if (= next-idx (cl:length (the node current-node)))
-                                    ;; If NEXT-IDX is not a valid index into CURRENT-NODE, we need to
-                                    ;; re-jigger the stack to find a new leaf node.
-                                    (advance-to-next-node)
-                                    ;; Otherwise, just record the NEXT-IDX and you're done.
-                                    (setf (stack-peek index-stack) next-idx))))
+;;; equality comparison
 
-                            (advance-to-next-node ()
-                              ;; On entering here from ADVANCE-INDEX, we know the top of NODE-STACK and
-                              ;; INDEX-STACK to be invalid, so get rid of them.
-                              (vector-pop node-stack)
-                              (vector-pop index-stack)
-                              (if (= 0 (cl:length node-stack))
-                                  ;; If you're out of nodes, start generating from the tail instead.
-                                  (setf tail-idx 0)
-                                  ;; Otherwise, recursively get a new next-highest node and index.
-                                  (progn
-                                    (advance-index (stack-peek node-stack)
-                                                   (stack-peek index-stack))
-                                    ;; If the recursive call to ADVANCE-INDEX got all the way to the bottom of
-                                    ;; the stack and moved into the tail, don't try to continue.
-                                    (unless tail-idx
-                                      ;; But otherwise, push the next node onto the stack, and start
-                                      ;; traversing it at index 0.
-                                      (vector-push (svref (stack-peek node-stack) (stack-peek index-stack))
-                                                   node-stack)
-                                      (vector-push 0 index-stack))))))
-                     (if tail-idx
-                         (generate-from-tail)
-                         (generate-from-body))))))))
+(declaim (ftype (function (vec vec
+                               &optional (or symbol (function (t t) (values t &rest t))))
+                          (values boolean &optional))
+                equal)
+         ;; Inlining `equal' may allow more efficient calls to ELT-EQUAL.
+         (inline equal))
+(defun equal (left right &optional (elt-equal #'eql))
+  (and (= (length left) (length right))
+       (with-vec-generator (left-gen left)
+         (with-vec-generator (right-gen right)
+           (iter (declare (declare-variables))
+             (repeat (length left))
+             (unless (funcall elt-equal (advance left-gen) (advance right-gen))
+               (return nil))
+             (finally (return t)))))))
+
+;;; printing vecs
+
+(defmethod print-object ((vec vec) stream)
+  (when (and *print-readably* (not *read-eval*))
+    (error "Unable to readbly print a VEC when *READ-EVAL* is nil."))
+  (when *print-readably*
+    (write-string "#." stream))
+  (write-string "(vec" stream)
+  (with-vec-generator (generator vec)
+    (iter (declare (declare-variables))
+      (repeat (length vec))
+      (write-char #\space stream)
+      (write (advance generator) :stream stream)))
+  (write-string ")" stream))
 
 ;;; converting between cl sequences and vecs
 
@@ -1051,7 +1051,8 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
 (defun to-list (vec)
   (if (= (length vec) 0)
       nil
-      (collect-to-list (generate-vec vec))))
+      (with-vec-generator (generator vec)
+        (collect-to-list generator))))
 
 (declaim (ftype (function (vec &key (:element-type t)
                                (:fill-pointer (or boolean array-length))
@@ -1069,23 +1070,23 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
 `:fill-pointer' is extended to accept `t', in addition to its usual values of `nil' or an
 `array-index'. Supplying `:fill-pointer t' sets the fill-pointer of the resulting vector to be equal to its
 length. `:adjustable t' should likely also be supplied in this case."
-  (iter (declare (declare-variables))
-    (with vector = (make-array (length vec)
-                               :element-type element-type
-                               :fill-pointer (etypecase fill-pointer
-                                               (null nil)
-                                               ((eql t) (length vec))
-                                               (array-length fill-pointer))
-                               :adjustable adjustable))
-    (with gen = (generate-vec vec))
-    (for idx below (length vec))
-    (for next-elt = (advance gen))
-    (assert (typep next-elt element-type) (next-elt)
-            'type-error
-            :expected-type element-type
-            :datum next-elt)
-    (setf (aref vector idx) next-elt)
-    (finally (return vector))))
+  (with-vec-generator (gen vec)
+    (iter (declare (declare-variables))
+      (with vector = (make-array (length vec)
+                                 :element-type element-type
+                                 :fill-pointer (etypecase fill-pointer
+                                                 (null nil)
+                                                 ((eql t) (length vec))
+                                                 (array-length fill-pointer))
+                                 :adjustable adjustable))
+      (for idx below (length vec))
+      (for next-elt = (advance gen))
+      (assert (typep next-elt element-type) (next-elt)
+              'type-error
+              :expected-type element-type
+              :datum next-elt)
+      (setf (aref vector idx) next-elt)
+      (finally (return vector)))))
 
 (declaim (ftype (function (vec) (values simple-vector &optional))
                 to-vector))

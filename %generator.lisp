@@ -8,12 +8,12 @@
   (:export #:generator
            #:done
            #:advance
+           #:define-generator
            #:generate-list
            #:with-list-generator
            #:generate-these
            #:generate-vector
            #:with-vector-generator
-           #:generate-constantly
            #:do-generator
            #:collect-to-list
            #:collect-to-vector
@@ -58,34 +58,123 @@ VARS are treated as in `let*'."
   :test (constantly t) ;; no useful way to compare generators, so just don't incompatibly redefine this lmao
   )
 
-(declaim (ftype (function (list) (values generator &optional))
-                generate-list)
-         (inline generate-list))
-(defun generate-list (list)
-  "Generate elements of LIST in order left-to-right."
-  (generator ((next list))
-    (if next (pop next)
-        (done))))
+(eval-when (:compile-toplevel :load-toplevel)
+  (defun typed-arg-type (typed-arg)
+    (etypecase typed-arg
+      (symbol t)
+      (cons (second typed-arg))))
+  (defun typed-arg-name (typed-arg)
+    (etypecase typed-arg
+      (symbol typed-arg)
+      (cons (first typed-arg)))))
 
-(declaim (ftype (function (list (function (generator) (values &rest t)))
-                          (values &rest t))
-                call-with-list-generator)
-         (inline call-with-list-generator))
-(defun call-with-list-generator (list thunk)
-  (let* ((next list))
-    (flet ((generator ()
-             (if next
-                 (pop next)
-                 (done))))
-      (declare (dynamic-extent #'generator))
-      (funcall thunk #'generator))))
+(defmacro define-indefinite-extent-generator (make-generator (&rest typed-args) docstring (&rest bindings) &body generator-body)
+  "Define a function named MAKE-GENERATOR which produces a generator.
 
-(defmacro with-list-generator ((generator-binding list) &body body)
-  "Invoke BODY with GENERATOR-BINDING bound to a dynamic-extent `generator' which yields the elements from LIST.
+- MAKE-GENERATOR should be a symbol which will be defined as a new function.
+- TYPED-ARGS should each be either a two-element list (NAME TYPE), or a symbol NAME with implicit type
+  `t'. These will be the arguments to the MAKE-GENERATOR function, and will be visible within the BINDINGS'
+  initforms and the GENERATOR-BODY.
+- DOCSTRING should be a string to be attached to the MAKE-GENERATOR function as documentation.
+- BINDINGS should each be a (NAME INITFORM) pair, which will be bound by `let*' around the GENERATOR-BODY. The
+  INITFORMs may refer to previous BINDINGS, and to the TYPED-ARGS. These bindings will persist between
+  multiple invocations of a generator, and can be used to store mutable state.
+- GENERATOR-BODY should be expressions which will be evaluated on each invocation of the resulting
+  generator. They should either return the next value to be yielded by the generator, or call `done' to signal
+  the end of the generator."
+  `(progn
+     (declaim (ftype (function (,@(mapcar #'typed-arg-type typed-args)) (values generator &optional))
+                     ,make-generator)
+              (inline ,make-generator))
+     (defun ,make-generator (,@(mapcar #'typed-arg-name typed-args))
+       ,docstring
+       (let* (,@bindings)
+         (lambda () ,@generator-body)))))
 
-This is an interface to provide a similar functionality as `generate-list', but with the generator closure
-stack-allocated. The LIST will not be dynamic-extent allocated unless otherwise arranged."
-  `(call-with-list-generator ,list (lambda (,generator-binding) ,@body)))
+(defmacro define-dynamic-extent-generator (with-generator call-with-generator (&rest typed-args) docstring (&rest bindings) &body generator-body)
+  "Define a macro named WITH-GENERATOR which evaluates its body in a dynamic context with access to a generator.
+
+- WITH-GENERATOR should be a symbol which will be defined as a new macro.
+- CALL-WITH-GENERATOR should be a symbol which will be defined as a function which will implement the
+  semantics of the WITH-GENERATOR macro.
+- TYPED-ARGS should each be either a two-element list (NAME TYPE), or a symbol NAME with implicit type
+  `t'. These will be additional arguments to the WITH-GENERATOR macro, and will be visible within the
+  BINDINGS' initforms and the GENERATOR-BODY.
+- DOCSTRING should be a string to be attached to the WITH-GENERATOR macro as documentation.
+- BINDINGS should each be a (NAME INITFORM) pair, which will be bound by `let*' around the GENERATOR-BODY. The
+  INITFORMs may refer to previous BINDINGS, and to the TYPED-ARGS. These bindings will persist between
+  multiple invocations of a generator, and can be used to store mutable state.
+- GENERATOR-BODY should be expressions which will be evaluated on each invocation of the resulting
+  generator. They should either return the next value to be yielded by the generator, or call `done' to signal
+  the end of the generator.
+
+The produced WITH-GENERATOR macro will have the syntax:
+
+(WITH-GENERATOR (GENERATOR-BINDING ...ARGS)
+  ...BODY)
+
+Where
+- WITH-GENERATOR is the symbol passed to `define-dynamic-extent-generator' as WITH-GENERATOR,
+- GENERATOR-BINDING is a symbol to be locally bound within the BODY as a `generator', which will be declared
+  `dynamic-extent',
+- ARGS are expressions which evaluate to values of types appropriate for the TYPED-ARGS,
+- BODY are expressions to be evaluated in a dynamic context with GENERATOR-BINDING bound to a `dynamic-extent'
+  generator."
+  (with-gensyms (generator-binding with-generator-body with-generator-body-function)
+    `(progn
+       (declaim (ftype (function (,@(mapcar #'typed-arg-type typed-args)
+                                  (function (generator) (values &rest t)))
+                                 (values &rest t))
+                       ,call-with-generator)
+                (inline ,call-with-generator))
+       (defun ,call-with-generator (,@(mapcar #'typed-arg-name typed-args) thunk)
+         (let* (,@bindings)
+           (flet ((generator ()
+                    ,@generator-body))
+             (declare (dynamic-extent #'generator))
+             (funcall thunk #'generator))))
+
+       (defmacro ,with-generator ((,generator-binding ,@(mapcar #'typed-arg-name typed-args)) &body ,with-generator-body)
+         ,docstring
+         (list 'flet (list (list* ',with-generator-body-function (list ,generator-binding) ,with-generator-body))
+               (list 'declare (list 'dynamic-extent (list 'function ',with-generator-body-function)))
+               (list ',call-with-generator
+                     ,@(mapcar #'typed-arg-name typed-args)
+                     (list 'function ',with-generator-body-function)))))))
+
+(defmacro define-generator (name (&rest typed-args) docstring (&rest bindings) &body generator-body)
+  "Define a function NAME-generator and a macro with-NAME-generator for indefinite-extent and dynamic-extent generators, respectively.
+
+- NAME should be a symbol which will be combined with the parts \"GENERATE-~a\" and \"WITH-~a-GENERATOR\" to
+  produce the names of the resulting function and macro respectively.
+- TYPED-ARGS should each be either a two-element list (NAME TYPE), or a symbol NAME with implicit type
+  `t'. These will be arguments to the defined function or macro, and will be visibile within the BINDINGS'
+  initforms and the GENERATOR-BODY.
+- BINDINGS should each be a (NAME INITFORM) pair, which will be bound by `let*' around the GENERATOR-BODY. The
+  INITFORMs may refer to previous BINDINGS, and to the TYPED-ARGS. These bindings will persist between
+  multiple invocations of a generator, and can be used to store mutable state.
+- GENERATOR-BODY should be expressions which will be evaluated on each invocation of the resulting
+  generator. They should either return the next value to be yielded by the generator, or call `done' to signal
+  the end of the generator."
+  `(progn
+     (define-indefinite-extent-generator ,(intern (format nil "GENERATE-~a" name) *package*)
+         ,typed-args
+         ,docstring
+         ,bindings
+       ,@generator-body)
+     (define-dynamic-extent-generator ,(intern (format nil "WITH-~a-GENERATOR" name) *package*)
+         ,(intern (format nil "CALL-WITH-~a-GENERATOR" name) *package*)
+         ,typed-args
+         ,docstring
+         ,bindings
+         ,@generator-body)))
+
+(define-generator list ((list list))
+                  "Generate elements of LIST in order left-to-right."
+    ((next list))
+  (if next
+      (pop next)
+      (done)))
 
 (declaim (ftype (function (&rest t) (values generator &optional))
                 generate-these)
@@ -94,15 +183,12 @@ stack-allocated. The LIST will not be dynamic-extent allocated unless otherwise 
   "Generate the ELTS in order left-to-right."
   (generate-list elts))
 
-(declaim (ftype (function (vector) (values generator &optional))
-                generate-vector)
-         (inline generate-vector))
-(defun generate-vector (vec)
-  "Generate elements of VEC left-to-right.
+(define-generator vector ((vector vector))
+                  "Generate elements of VECTOR left-to-right.
 
-If VEC has a fill pointer, only generate elements before the fill pointer.
+If VECTOR has a fill pointer, only generate elements before the fill pointer.
 
-The consequences are undefined if VEC is destructively modified during generation. This includes:
+The consequences are undefined if VECTOR is destructively modified during generation. This includes:
 - Altering its contents via `setf' of `aref' or any other operator.
 - Changing its fill pointer via `setf' of `fill-pointer', `vector-push', `vector-push-extend', or any other
   operator.
@@ -112,41 +198,11 @@ The consequences are undefined if VEC is destructively modified during generatio
 
 Making any of these actions may cause a generator which had previously signaled `done' to produce
 new elements, or do other weird stuff."
-  (generator ((i 0))
-    (declare (type array-index i))
-    (if (< i (length vec)) (prog1 (aref vec i)
-                             (incf i))
-        (done))))
-
-(declaim (ftype (function (vector (function (generator) (values &rest t)))
-                          (values &rest t))
-                call-with-vector-generator)
-         (inline call-with-vector-generator))
-(defun call-with-vector-generator (vector thunk)
-  (let* ((next-idx 0))
-    (declare (type array-index next-idx))
-    (flet ((generator ()
-             (if (< next-idx (length vector))
-                 (prog1 (aref vector next-idx)
-                   (incf next-idx))
-                 (done))))
-      (declare (dynamic-extent #'generator))
-      (funcall thunk #'generator))))
-
-(defmacro with-vector-generator ((generator-binding vector) &body body)
-  "Invoke BODY with GENERATOR-BINDING bound to a dynamic-extent `generator' which yields the elements from VECTOR.
-
-This is an interface to provide a similar functionality as `generate-vector', but with the generator closure
-stack-allocated. The VECTOR will not be dynamic-extent allocated unless otherwise arranged."
-  `(call-with-vector-generator ,vector (lambda (,generator-binding) ,@body)))
-
-(declaim (ftype (function (t) (values generator &optional))
-                generate-constantly)
-         (inline generate-constantly))
-(defun generate-constantly (item)
-  "Generate ITEM forever, never terminating."
-  (generator ()
-    item))
+    ((i 0))
+  (declare (type array-index i))
+  (if (< i (length vector)) (prog1 (aref vector i)
+                              (incf i))
+      (done)))
 
 ;;; iterating over generators
 
