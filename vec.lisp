@@ -15,6 +15,7 @@
    #:length
    #:push-back
    #:extend
+   #:extend-from-list #:extend-from-vector
    #:pop-back
    #:equal
    #:from-list #:to-list
@@ -332,7 +333,11 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
                                  :tail nil))
 
 (declaim (ftype (function (length generator) (values vec &optional))
-                generator-vec))
+                generator-vec)
+         ;; `generator-vec' is private and will be accessed only by `vec', `from-list' and `from-vector', so
+         ;; inlining is not a code size concern, and making the generator a local function may allow some
+         ;; optimizations.
+         (inline generator-vec))
 (defun generator-vec (length contents)
   (if (zerop length)
       +empty+
@@ -352,6 +357,8 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
                                (:tail tail-buf))
                           (values vec &optional))
                 copy-vec)
+         ;; Private function that can be inlined without worrying about code size, and reducing to an
+         ;; (also inline) struct constructor may allow some optimizations.
          (inline copy-vec))
 (defun copy-vec (vec &key (height (%vec-height vec))
                        (length (%vec-length vec))
@@ -366,6 +373,7 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
 
 (declaim (ftype (function (tail-buf) (values boolean &optional))
                 tail-has-room-p)
+         ;; Inlining `tail-has-room-p' may allow arithmetic optimizations and improved type inference.
          (inline tail-has-room-p))
 (defun tail-has-room-p (tail)
   (if tail
@@ -385,6 +393,7 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
 
 (declaim (ftype (function (height) (values length &optional))
                 max-body-length-at-height)
+         ;; Inlining `max-body-length-at-height' may allow arithmetic optimizations.
          (inline max-body-length-at-height))
 (defun max-body-length-at-height (height)
   (expt +branch-rate+ (1+ height)))
@@ -483,7 +492,7 @@ LENGTH-IN-ELTS.
 LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of LEADING-DIRECT-CHILD."
   (alloc-node (concat (generate-these leading-direct-child)
                       (child-nodes-generator direct-child-height
-                                             (- length-in-elts +branch-rate+)
+                                             (- length-in-elts (elts-per-node-at-height direct-child-height))
                                              follow-elts))
               (trie-length-in-nodes-at-height length-in-elts direct-child-height)))
 
@@ -553,6 +562,7 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
 (declaim (ftype (function (node height length generator length) (values node &optional))
                 extend-node-at-height))
 (defun extend-node-at-height (not-full-node height current-length-in-elts new-elements target-length-in-elts)
+  "Extend the trie NOT-FULL-NODE to be longer while maintaining its existing length."
   (let* ((child-height (1- height))
          (elts-per-full-child (elts-per-node-at-height child-height))
          (num-full-leading-children (floor current-length-in-elts elts-per-full-child))
@@ -561,8 +571,8 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                                                              child-height)))
     (declare (height child-height)
              (length elts-per-full-child)
-             (node-length num-full-leading-children
-                          length-in-children))
+             ((or (eql 0) node-length) num-full-leading-children)
+             (node-length length-in-children))
     (if (not partial-child-p)
         ;; If all our children are full, this operation is easy: construct a new node which has all of the
         ;; existing children, followed by new nodes taken from the NEW-ELEMENTS.
@@ -593,9 +603,9 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                (filled-partial-existing-child-length-in-elts (min elts-per-full-child
                                                                   (+ partial-existing-child-length-in-elts
                                                                      available-new-elts)))
-               (new-children-length-in-elts (- target-length-in-elts
-                                               full-leading-children-length-in-elts
-                                               new-elts-to-fill-partial-existing-child)))
+               (new-children-length-in-elts (max 0
+                                                 (- available-new-elts
+                                                    new-elts-to-fill-partial-existing-child))))
           (declare (length full-leading-children-length-in-elts
                            partial-existing-child-length-in-elts
                            new-elts-to-fill-partial-existing-child
@@ -635,6 +645,8 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
 
 (declaim (ftype (function (tail-buf) (values generator &optional))
                 generate-tail)
+         ;; Inlining generator constructors may allow optimizations from treating the generator closure as a
+         ;; local.
          (inline generate-tail))
 (defun generate-tail (tail-buf)
   (if tail-buf
@@ -642,7 +654,12 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
       (lambda () (done))))
 
 (declaim (ftype (function (vec generator length) (values vec &optional))
-                extend-from-generator))
+                extend-from-generator)
+
+         ;; `extend-from-generator' is private and will be called only by `extend', `extend-from-list',
+         ;; `extend-from-vector' and `extend-from-vec', so inlining a large function is reasonable. Inlining
+         ;; may allow optimizations by also inlining the NEW-ELEMENTS generator.
+         (inline extend-from-generator))
 (defun extend-from-generator (vec new-elements added-length)
   (with-accessors ((height %vec-height)
                    (length %vec-length)
@@ -667,7 +684,7 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
              ;; have tail, but new elements will fit in it
              (copy-vec vec
                        :length new-length
-                       :tail (make-tail (the tail-length (+ added-length (tail-length vec)))
+                       :tail (make-tail new-tail-length
                                         (concat (generate-tail tail) new-elements))))
 
             ((and (not body)
@@ -675,7 +692,7 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
              ;; no body, full tail: fold tail buf into body, then grow from new-elements.
              (%make-vec :height new-height
                         :length new-length
-                        :body (fill-behind-node-to-height new-height tail 0 new-elements new-length)
+                        :body (fill-behind-node-to-height new-height tail 0 new-elements new-body-length)
                         :tail (make-tail new-tail-length new-elements)))
 
             ((not body)
@@ -744,8 +761,7 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                         :tail (make-tail new-tail-length new-elements)))))))
 
 (declaim (ftype (function (vec &rest t) (values vec &optional))
-                extend)
-         (inline extend))
+                extend))
 (defun extend (vec &rest new-elements)
   "Return a new `vec' with all the contents of VEC followed by the NEW-ELEMENTS.
 
@@ -761,7 +777,35 @@ log_{+branch-rate+}N operations to splice it into the body.
 
 For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-rate+}N)."
   (declare (dynamic-extent new-elements))
-  (extend-from-generator vec (generate-list new-elements) (cl:length new-elements)))
+  (with-list-generator (elts-generator new-elements)
+    (extend-from-generator vec elts-generator (cl:length new-elements))))
+
+(declaim (ftype (function (vec list) (values vec &optional))
+                extend-from-list))
+(defun extend-from-list (vec new-elements)
+  "Return a new `vec' with all the contents of VEC followed by the NEW-ELEMENTS.
+
+See `extend' for more information."
+  (with-list-generator (elts-generator new-elements)
+    (extend-from-generator vec elts-generator (cl:length new-elements))))
+
+(declaim (ftype (function (vec vector) (values vec &optional))
+                extend-from-vector))
+(defun extend-from-vector (vec new-elements)
+  "Return a new `vec' with all the contents of VEC followed by the NEW-ELEMENTS.
+
+See `extend' for more information."
+
+  ;; It would be nice to declare `extend-from-vector' as `inline' in order to optimize based on the
+  ;; element-type and simple-ness of the NEW-ELEMENTS vector, but that would result in inlining the large
+  ;; `extend-from-generator' into each callsite.
+
+  ;; CONSIDER: locally declaring `extend-from-generator' as `notinline'.
+
+  ;; CONSIDER: compiler-macro trickery to specialize.
+  #+sbcl (declare (sb-ext:muffle-conditions sb-ext:compiler-note))
+  (with-vector-generator (elts-generator new-elements)
+    (extend-from-generator vec elts-generator (cl:length new-elements))))
 
 ;;; PUSH-BACK and helpers
 
@@ -842,7 +886,6 @@ For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-ra
 (declaim (ftype (function (&rest t) (values vec &optional))
                 vec))
 (defun vec (&rest elts)
-  (declare (dynamic-extent elts))
   (with-list-generator (generator elts)
     (generator-vec (cl:length elts) generator)))
 
@@ -852,6 +895,7 @@ For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-ra
                                &optional (or symbol (function (t t) (values t &rest t))))
                           (values boolean &optional))
                 equal)
+         ;; Inlining `equal' may allow more efficient calls to ELT-EQUAL.
          (inline equal))
 (defun equal (left right &optional (elt-equal #'eql))
   (and (= (length left) (length right))
@@ -881,12 +925,16 @@ For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-ra
 
 (declaim (ftype (function (vector) (values t &optional))
                 stack-peek)
+         ;; Inlining functions which access vectors may allow more efficient specialized access when the
+         ;; caller knows the array's element type.
          (inline stack-peek))
 (defun stack-peek (stack)
   (aref stack (1- (cl:length stack))))
 
 (declaim (ftype (function (t vector) (values t &optional))
                 (setf stack-peek))
+         ;; Inlining functions which access vectors may allow more efficient specialized access when the
+         ;; caller knows the array's element type.
          (inline (setf stack-peek)))
 (defun (setf stack-peek) (new-element stack)
   (setf (aref stack (1- (cl:length stack)))
@@ -894,6 +942,7 @@ For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-ra
 
 (declaim (ftype (function (vec) (values generator &optional))
                 generate-vec))
+;; CONSIDER: should `generate-vec' be declared inline?
 (defun generate-vec (vec)
   "A generator which yields the elements of VEC in order. The ADVANCE operation is amortized O(1).
 
@@ -1009,6 +1058,8 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
                                (:adjustable boolean))
                           (values vector &optional))
                 to-specialized-vector)
+         ;; Inlining `to-specialized-vector' may allow more efficient array operations when the ELEMENT-TYPE
+         ;; is constant.
          (inline to-specialized-vector))
 (defun to-specialized-vector (vec &key (element-type t)
                                         fill-pointer
