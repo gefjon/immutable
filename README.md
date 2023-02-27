@@ -89,3 +89,17 @@ shadow CL symbols liberally to accomplish this.
     - [ ] remove one pair
     - [ ] remove multiple pairs?
   - [ ] integration with trivial-extensible-sequences?
+- [ ] `rope` - ropes of characters as strings
+  - [ ] type definition
+    - [ ] node for strings
+      - [ ] specialize on string subtypes?
+    - [ ] node for concatenation
+    - [ ] node for substring
+  - [ ] short node optimization to avoid unnecessary indirections
+    - [ ] experiment with different cutoffs to balance between cost of copying and cost of indirection
+  - [ ] lookup
+  - [ ] internal iteration facility
+  - [ ] convert from CL strings
+  - [ ] convert to CL strings
+  - [ ] convenient constructor?
+  - [ ] output to stream without converting to string
