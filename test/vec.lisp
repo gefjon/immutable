@@ -6,6 +6,9 @@
                     (#:gen :immutable/%generator)))
 (in-package :immutable/test/vec)
 
+;; don't care about micro-optimizations in the tests
+#+sbcl (declaim (sb-ext:muffle-conditions sb-ext:compiler-note))
+
 (def-suite immutable-vec-suite)
 
 ;;; helpers
