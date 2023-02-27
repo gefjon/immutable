@@ -81,6 +81,10 @@ VARS are treated as in `let*'."
       (funcall thunk #'generator))))
 
 (defmacro with-list-generator ((generator-binding list) &body body)
+  "Invoke BODY with GENERATOR-BINDING bound to a dynamic-extent `generator' which yields the elements from LIST.
+
+This is an interface to provide a similar functionality as `generate-list', but with the generator closure
+stack-allocated. The LIST will not be dynamic-extent allocated unless otherwise arranged."
   `(call-with-list-generator ,list (lambda (,generator-binding) ,@body)))
 
 (declaim (ftype (function (&rest t) (values generator &optional))
@@ -130,6 +134,10 @@ new elements, or do other weird stuff."
       (funcall thunk #'generator))))
 
 (defmacro with-vector-generator ((generator-binding vector) &body body)
+  "Invoke BODY with GENERATOR-BINDING bound to a dynamic-extent `generator' which yields the elements from VECTOR.
+
+This is an interface to provide a similar functionality as `generate-vector', but with the generator closure
+stack-allocated. The VECTOR will not be dynamic-extent allocated unless otherwise arranged."
   `(call-with-vector-generator ,vector (lambda (,generator-binding) ,@body)))
 
 (declaim (ftype (function (t) (values generator &optional))
