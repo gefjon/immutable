@@ -1,6 +1,8 @@
 # IMMUTABLE - persistent data structures in Common Lisp
 ## By Phoebe Goldman
 
+![CI](https://github.com/gefjon/immutable/actions/workflows/CI.yml/badge.svg?branch=main)
+
 This is a (currently WIP) repository of immutable, persistent data structures in Common
 Lisp. My dream is that someday it will rival Clojure's standard library collection types.
 
