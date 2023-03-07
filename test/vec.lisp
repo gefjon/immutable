@@ -321,7 +321,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
       (is (= (- (vec:length vec) elts-to-remove)
              (vec:length retracted))))))
 
-(def-test retract-known-vector-expected-outputs (:suite immutable-vec-suite)
+(def-test retract-known-vec-expected-outputs (:suite immutable-vec-suite)
   (flet ((is-expected (vec elts-to-remove expected-contents)
            (is-vec-valid vec)
            (let* ((retracted (vec:retract vec elts-to-remove)))
@@ -334,3 +334,45 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
       (let* ((vec-128 (vec:from-list (list-below 128))))
         (iter (for i below 128)
           (is-expected vec-128 i (list-below (- 128 i))))))))
+
+;;; testing the UPDATE-AT and REPLACE-AT operators
+
+(def-test update-at-long-integer-vec-1+ (:suite immutable-vec-suite)
+  (for-all ((vec (gen-vec :elements (gen-integer :min -128 :max 128)
+                          :length *gen-length-of-height-2-or-3*)))
+    (let* ((index-to-update (random (vec:length vec)))
+           (updated (vec:update-at vec index-to-update #'1+)))
+      (quietly
+        (is-vec-valid vec)
+        (is-vec-valid updated)
+        (is (= (vec:length vec)
+               (vec:length updated)))
+        (iter (for i below (vec:length vec))
+          (if (= i index-to-update)
+              (is (= (1+ (vec:ref vec i))
+                     (vec:ref updated i)))
+              (is (= (vec:ref vec i)
+                     (vec:ref updated i))))))
+
+      (write-char #\. *test-dribble*)
+      (sync-test-dribble))))
+
+(def-test replace-at-long-integer-vec (:suite immutable-vec-suite)
+  (for-all ((vec (gen-vec :elements (gen-integer :min -128 :max 128)
+                          :length *gen-length-of-height-2-or-3*)))
+    (let* ((new-element '#:not-an-integer)
+           (index-to-replace (random (vec:length vec)))
+           (replaced (vec:replace-at vec index-to-replace new-element)))
+      (quietly
+        (is-vec-valid vec)
+        (is-vec-valid replaced)
+        (is (= (vec:length vec)
+               (vec:length replaced)))
+        (iter (for i below (vec:length vec))
+          (if (= i index-to-replace)
+              (is (eq new-element
+                     (vec:ref replaced i)))
+              (is (= (vec:ref vec i)
+                     (vec:ref replaced i))))))
+      (write-char #\. *test-dribble*)
+      (sync-test-dribble))))

@@ -30,7 +30,8 @@ shadow CL symbols liberally to accomplish this.
   - [x] pop one from end - `pop-back`
   - [x] append multiple to end - `extend`
   - [x] remove multiple from end - `retract`
-  - [ ] replace element at given index - `replace-at`
+  - [x] replace element at given index - `replace-at`
+  - [x] update element at given index by function - `update-at`
   - [ ] convenient iteration constructs
     - [ ] `map` - apply function to each element, collect result to new `vec`
     - [ ] `for-each` - apply function to each element, discard result
@@ -63,7 +64,7 @@ shadow CL symbols liberally to accomplish this.
     - [ ] no-op method on `copy-seq`
     - [ ] method on `emptyp`
     - [ ] method on `map`
-- [ ] `map` - hash array mapped tries
+- [ ] `dict` - hash array mapped tries
   - [ ] type definition
     - [ ] generic over hash and equality functions
   - [ ] lookup
@@ -77,7 +78,7 @@ shadow CL symbols liberally to accomplish this.
   - [ ] remove one pair
   - [ ] remove multiple pairs?
   - [ ] convenient iteration constructs
-    - [ ] `map-values` - apply function to each value, leaving keys untouched, collect to new `map`
+    - [ ] `map-values` - apply function to each value, leaving keys untouched, collect to new `dict`
     - [ ] `for-each` - apply function to each pair, discard result
     - [ ] `do` - macro analogous to `dolist`
     - [ ] `iterate` integration?
@@ -85,7 +86,7 @@ shadow CL symbols liberally to accomplish this.
   - [ ] hashing?
   - [ ] transients
     - [ ] representation for transient ids
-    - [ ] make map transient - `transient!`
+    - [ ] make dict transient - `transient!`
     - [ ] add one pair
     - [ ] add multiple pairs?
     - [ ] remove one pair

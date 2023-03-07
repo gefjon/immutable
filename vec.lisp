@@ -9,6 +9,7 @@
    #:out-of-bounds-index
    #:out-of-bounds-length
    #:out-of-bounds-vec
+   #:out-of-bounds-operation
 
    #:pop-back-empty
 
@@ -42,6 +43,10 @@
 
    ;; remove multiple from end
    #:retract
+
+   ;; replace individual elements in a vec
+   #:update-at
+   #:replace-at
 
    ;; test if two vectors are equal
    #:equal
@@ -180,10 +185,14 @@ arguments `:element-type', `:adjustable' and `:fill-pointer' analogous to `make-
             :reader out-of-bounds-length)
    (%index :type unsigned-byte
            :initarg :index
-           :reader out-of-bounds-index))
+           :reader out-of-bounds-index)
+   (%operation :type (member 'ref 'replace-at 'update-at)
+               :initarg :operation
+               :reader out-of-bounds-operation))
   (:report (lambda (c s)
-             (format s "Invalid index ~d for VEC of length ~d: ~a"
+             (format s "Invalid index ~d during ~s for VEC of length ~d: ~a"
                      (out-of-bounds-index c)
+                     (out-of-bounds-operation c)
                      (out-of-bounds-length c)
                      (out-of-bounds-vec c)))))
 
@@ -297,7 +306,8 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
       (error 'out-of-bounds
              :vec vec
              :length length
-             :index idx)
+             :index idx
+             :operation 'ref)
       (unsafe-ref vec idx)))
 
 ;;; computing required size, shape, height of new vecs
@@ -1117,6 +1127,100 @@ i.e. amortized O(1) on small ELTS-TO-REMOVE, and O(log_{+branch_rate+}N) on larg
                           :height new-height
                           :body new-body
                           :tail new-tail)))))))
+
+;;; altering elements at a given index with REPLACE-AT and UPDATE-AT
+
+(declaim (ftype (function (simple-vector array-index (function (t) (values t &rest t)))
+                          (values simple-vector &optional))
+                sv-update-at)
+         ;; inline advantageous because it may allow inlining the update-element function
+         (inline sv-update-at))
+(defun sv-update-at (simple-vector index update-element)
+  (let* ((copy (copy-seq simple-vector)))
+    (setf (svref copy index) (funcall update-element (svref copy index)))
+    copy))
+
+(declaim (ftype (function (height node index (function (t) (values t &rest t)))
+                          (values node &optional))
+                trie-update-at)
+         ;; inline advantageous because it may allow inlining the update-element function
+         (inline trie-update-at))
+(defun trie-update-at (height node index update-element)
+  ;; for reasons that escape me, SBCL will try to inline self-recursive functions into themselves. make it not
+  ;; do that.
+  (declare (notinline trie-update-at))
+  (if (zerop height)
+      (sv-update-at node index update-element)
+      (multiple-value-bind (curr remaining) (extract-index-parts-for-height height index)
+        (flet ((update-in-child (child)
+                 (trie-update-at (1- height)
+                                 child
+                                 remaining
+                                 update-element)))
+          (declare (dynamic-extent #'update-in-child))
+          (sv-update-at node curr #'update-in-child)))))
+
+(declaim (ftype (function (vec index (function (t) (values t &rest t))) (values vec &optional))
+                update-at)
+         ;; save inline info for `replace-at', but we'll declare this NOTINLINE so users don't get code size
+         ;; inflation.
+         (inline update-at))
+(defun update-at (vec index update-element)
+  "Replace the element of VEC at INDEX by calling UPDATE-ELEMENT on the old element.
+
+Find the INDEX-th element of VEC, apply UPDATE-ELEMENT to it, and return a new `vec' like VEC but with the
+result of the call at INDEX.
+
+If INDEX is out-of-bounds for VEC, signals an error of class `out-of-bounds'.
+
+# Time complexity
+
+This operation runs in O(log_{+branch-rate+}N) time in the length of VEC."
+  (cond ((>= index (length vec))
+         (error 'out-of-bounds
+                :vec vec
+                :index index
+                :length (length vec)
+                :operation 'update-at))
+
+        ((index-in-tail-p vec index)
+         (copy-vec vec
+                   :tail (sv-update-at (%vec-tail vec)
+                                        (- index (body-length vec))
+                                        update-element)))
+
+        (:else
+         (copy-vec vec
+                   :body (trie-update-at (%vec-height vec)
+                                          (%vec-body vec)
+                                          index
+                                          update-element)))))
+(declaim (notinline update-at))
+
+(declaim (ftype (function (vec index t) (values vec &optional))
+                replace-at))
+(defun replace-at (vec index new-element)
+  "Replace the element of VEC at INDEX with NEW-ELEMENT.
+
+Return a new `vec' like VEC but with NEW-ELEMENT at INDEX.
+
+If INDEX is out-of-bounds for VEC, signals an error of class `out-of-bounds'.
+
+# Time complexity
+
+This operation runs in O(log_{+branch-rate+}N) time in the length of VEC."
+  (when (>= index (length vec))
+    (error 'out-of-bounds
+           'vec vec
+           :index index
+           :length (length vec)
+           :operation 'replace-at))
+  (flet ((constantly-new-element (_)
+           (declare (ignore _))
+           new-element))
+    (declare (dynamic-extent #'constantly-new-element)
+             (inline update-at))
+    (update-at vec index #'constantly-new-element)))
 
 ;;; easy constructor
 
