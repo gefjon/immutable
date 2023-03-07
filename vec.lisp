@@ -4,21 +4,52 @@
   (:use :cl :iterate #:immutable/%generator)
   (:shadow #:length #:equal)
   (:export
+   ;; condition classes and accessors
    #:out-of-bounds
    #:out-of-bounds-index
    #:out-of-bounds-length
    #:out-of-bounds-vec
+
+   #:pop-back-empty
+
+   #:retract-not-enough-elements
+   #:retract-not-enough-elements-vec
+   #:retract-not-enough-elements-requested-length
+   #:retract-not-enough-elements-actual-length
+
+   ;; type and constructor
    #:vec
+
+   ;; the empty vector
    #:+empty+
+
+   ;; element access
    #:unsafe-ref
    #:ref
+
+   ;; reading length (shadowed over CL:LENGTH)
    #:length
+
+   ;; append one to end
    #:push-back
+
+   ;; append multiple to end
    #:extend
    #:extend-from-list #:extend-from-vector
+
+   ;; remove one from end
    #:pop-back
+
+   ;; remove multiple from end
+   #:retract
+
+   ;; test if two vectors are equal
    #:equal
+
+   ;; convert from CL sequences
    #:from-list #:to-list
+
+   ;; convert to CL sequences
    #:from-vector #:to-specialized-vector #:to-vector))
 (in-package :immutable/vec)
 
@@ -141,7 +172,8 @@ arguments `:element-type', `:adjustable' and `:fill-pointer' analogous to `make-
 ;;; condition class for out-of-bounds access
 
 (define-condition out-of-bounds (error)
-  ((%vec :initarg :vec
+  ((%vec :type vec
+         :initarg :vec
          :reader out-of-bounds-vec)
    (%length :type unsigned-byte
             :initarg :length
@@ -162,6 +194,23 @@ arguments `:element-type', `:adjustable' and `:fill-pointer' analogous to `make-
   (:report (lambda (c s)
              (declare (ignore c))
              (write-string "Attempt to POP-BACK from empty VEC" s))))
+
+;;; condition class for retract with not enough elements
+
+(define-condition retract-not-enough-elements (error)
+  ((%vec :initarg :vec
+         :reader retract-not-enough-elements-vec)
+   (%requested-length :type length
+                      :initarg :requested-length
+                      :reader retract-not-enough-elements-requested-length)
+   (%actual-length :type length
+                   :initarg :actual-length
+                   :reader retract-not-enough-elements-actual-length))
+  (:report (lambda (c s)
+             (format s "Attempt to RETRACT ~d elements from a VEC of length ~d: ~a"
+                     (retract-not-enough-elements-requested-length c)
+                     (retract-not-enough-elements-actual-length c)
+                     (retract-not-enough-elements-vec c)))))
 
 ;;; length computations
 
@@ -479,6 +528,8 @@ O(log_{+brach-rate+}N) time in the length of the input VEC, and the rest will ru
                      :length (1+ length)
                      :body (grow-trie body tail height length)
                      :tail (vector new-element))))))
+
+;;; adding multiple elements with EXTEND (and helpers)
 
 (declaim (ftype (function (height full-node generator length) (values node &optional))
                 fill-behind-direct-child))
@@ -807,7 +858,7 @@ See `extend' for more information."
   (with-vector-generator (elts-generator new-elements)
     (extend-from-generator vec elts-generator (cl:length new-elements))))
 
-;;; PUSH-BACK and helpers
+;;; POP-BACK and helpers
 
 (declaim (ftype (function (simple-vector) (values (or null simple-vector) t &optional))
                 sv-pop-back))
@@ -859,6 +910,16 @@ See `extend' for more information."
 (declaim (ftype (function (vec) (values vec t &optional))
                 pop-back))
 (defun pop-back (vec)
+  "Remove the last element from VEC and return it as the secondary value.
+
+Returns two values: a new `vec' like VEC but without its last element, and the element removed.
+
+Signals an error of class `pop-back-empty' if VEC is empty.
+
+# Time complexity
+
+This operation runs in amortized O(1) time. One out of every `+branch-rate+' `pop-back's will run in
+O(log_{+branch-rate+}N) time in the length of the input VEC, and the rest will run in constant time."
   (with-accessors ((tail %vec-tail)
                    (body %vec-body)
                    (length %vec-length)
@@ -880,6 +941,182 @@ See `extend' for more information."
                                         :tail new-tail
                                         :body new-body)
                              popped-element)))))))
+
+;;; removing multiple with RETRACT (and helpers)
+
+(declaim (ftype (function (simple-vector array-length) (values (or null simple-vector) &optional))
+                sv-retract)
+         (inline sv-retract))
+(defun sv-retract (simple-vector new-length)
+  (unless (zerop new-length)
+    (let* ((new-sv (make-array new-length)))
+      (iter (declare (declare-variables))
+        (for i below new-length)
+        (setf (svref new-sv i) (svref simple-vector i)))
+      new-sv)))
+
+(declaim (ftype (function (tail-length node height) (values tail-buf &optional))
+                extract-tail-from-leftmost-leaf))
+(defun extract-tail-from-leftmost-leaf (new-tail-length node height)
+  (if (zerop height)
+      (sv-retract node new-tail-length)
+      (extract-tail-from-leftmost-leaf new-tail-length (svref node 0) (1- height))))
+
+(declaim (ftype (function (length tail-length node height) (values (or null node) tail-buf &optional))
+                retract-body-at-same-height))
+(defun retract-body-at-same-height (new-body-length new-tail-length body height)
+  (cond ((and (zerop height)
+              (= new-body-length +branch-rate+)
+              (zerop new-tail-length))
+         ;; height of zero implies current body is full (this is one of our invariants). if we want the whole
+         ;; thing, just return it.
+         (values body nil))
+        ((and (zerop height)
+              (zerop new-body-length))
+         ;; if we want only part of the body, slice it up into a tail
+         (values nil (sv-retract body new-tail-length)))
+        ((zerop height)
+         ;; this is an invalid case; if we were supposed to deconstruct the buffer into a partial tail, we
+         ;; would've hit one of the previous cases.
+         (error
+          "Invalid use of `retract-body-at-same-height': cannot construct a partial leaf node of length ~a"
+          new-body-length))
+
+        (:else
+         ;; height >= 1: do some recursion
+         (let* ((child-height (1- height))
+                (elts-per-child (elts-per-node-at-height (1- height)))
+                (num-verbatim-children (floor new-body-length elts-per-child))
+                ;; bug: you're mis-identifying the presence of a partial child when height = 1
+                (partial-child-length (- new-body-length (the length (* num-verbatim-children elts-per-child))))
+                (partial-child-p (plusp partial-child-length)))
+           (multiple-value-bind (partial-child new-tail)
+               (if partial-child-p
+                   (retract-body-at-same-height partial-child-length
+                                                new-tail-length
+                                                (svref body num-verbatim-children)
+                                                child-height)
+                   (values nil (extract-tail-from-leftmost-leaf new-tail-length
+                                                                (svref body num-verbatim-children)
+                                                                child-height)))
+             (with-vector-generator (generate-children body)
+               (values (alloc-node (concat (take generate-children num-verbatim-children)
+                                           (if partial-child-p
+                                               (generate-these partial-child)
+                                               (lambda () (done))))
+                                   (+ num-verbatim-children
+                                      (if partial-child-p 1 0)))
+                       new-tail)))))))
+
+(declaim (ftype (function (height length tail-length node height) (values (or null node) tail-buf &optional))
+                retract-body-to-lower-height))
+(defun retract-body-to-lower-height (new-height new-body-length new-tail-length body height)
+  (cond ((= new-height height)
+         ;; if height = new-height, we already have a function to handle this case, so call it
+         (retract-body-at-same-height new-body-length new-tail-length body height))
+
+        ((= height (1+ new-height))
+         ;; if only one more step of recursion, handle an edge case where we want the whole leftmost child,
+         ;; and the tail comes out of the second child.
+         (let* ((elts-per-child (elts-per-node-at-height new-height))
+                (tail-from-second-child-p (and (plusp new-tail-length) (= new-body-length elts-per-child))))
+           (if tail-from-second-child-p
+               (values (svref body 0)
+                       (extract-tail-from-leftmost-leaf new-tail-length (svref body 1) new-height))
+
+               ;; if not in that edge case, use `retract-body-at-same-height'
+               (retract-body-at-same-height new-body-length new-tail-length (svref body 0) new-height))))
+
+        (:else
+         ;; otherwise, there's more than one step between height and new-height; recurse to close the difference.
+         (retract-body-to-lower-height new-height new-body-length new-tail-length (svref body 0) (1- height)))))
+
+(declaim (ftype (function (vec length) (values vec &optional))
+                retract))
+(defun retract (vec elts-to-remove)
+  "Remove the last ELTS-TO-REMOVE elements from VEC.
+
+If VEC contains at least ELTS-TO-REMOVE elements, return a new `vec' which removes the trailing elements. If
+VEC does not contain at least ELTS-TO-REMOVE elements, signal an error of class
+`retract-not-enough-elements'.
+
+E.g.
+
+(retract (vec 0 1 2 3 4 5) 2)
+; => (vec 0 1 2 3)
+
+# Time complexity
+
+FIXME: analyze the time complexity of `retract'. I (pgoldman 2023-03-07) expect it to be similar to `extend',
+i.e. amortized O(1) on small ELTS-TO-REMOVE, and O(log_{+branch_rate+}N) on large ELTS-TO-REMOVE."
+  (with-accessors ((tail %vec-tail)
+                   (body %vec-body)
+                   (length %vec-length)
+                   (height %vec-height))
+      vec
+
+    ;; This is a `symbol-macrolet' instead of a `let*' because we want to defer computing these values until
+    ;; they are needed. The efficiency is likely inconsequential (reduced code size might even improve perf if
+    ;; this were a `let*' by reducing duplication of the initforms), but it would be unsound to compute
+    ;; `new-height' before the `(minusp new-length)' test checks whether `new-length' is of type `length'
+    ;; (i.e. a non-negative fixnum).
+    (symbol-macrolet ((tail-length (tail-buf-length tail))
+                      (new-length (- length elts-to-remove))
+                      (new-height (length-required-height (max new-length 0)))
+                      (new-body-length (length-without-tail-buf new-length))
+                      (new-tail-length (- new-length new-body-length)))
+
+      (cond ((zerop elts-to-remove)
+             ;; remove no elements: no-op
+             vec)
+
+            ((minusp new-length)
+             ;; not enough elements: signal an error
+             (error 'retract-not-enough-elements
+                    :vec vec
+                    :requested-length elts-to-remove
+                    :actual-length length))
+
+            ((zerop new-length)
+             ;; remove all elements: return the empty vec singleton
+             +empty+)
+
+            ;; in all subsequent tests and branches, we know that `new-length' is of type `length'.
+
+            ((and tail (>= tail-length elts-to-remove))
+             ;; remove part of tail
+             (copy-vec vec
+                       :length new-length
+                       :tail (sv-retract tail new-tail-length)))
+
+
+
+            ((= height new-height)
+             ;; need to remove from body, but not so much to reduce height: slurp new tail out of existing
+             ;; body
+
+             (multiple-value-bind (new-body new-tail)
+                 (retract-body-at-same-height (the length new-body-length)
+                                              (the tail-length new-tail-length)
+                                              body
+                                              height)
+               (%make-vec :length new-length
+                          :height height
+                          :body new-body
+                          :tail new-tail)))
+
+            (:otherwise
+             ;; need to remove from body, which will reduce height; must extract a partial tail from the body
+             (multiple-value-bind (new-body new-tail)
+                 (retract-body-to-lower-height new-height
+                                               (the length new-body-length)
+                                               (the tail-length new-tail-length)
+                                               body
+                                               height)
+               (%make-vec :length new-length
+                          :height new-height
+                          :body new-body
+                          :tail new-tail)))))))
 
 ;;; easy constructor
 
@@ -922,7 +1159,7 @@ element to yield, then increments TOP-OF-INDEX-STACK. If that increment overflow
 TOP-OF-NODE-STACK, it pops from each stack, increments the index there to find a new leaf TOP-NODE-OF-STACK,
 and pushes it back to the vector. The pop and repush sequence will happen every +BRANCH-RATE+ elements, and
 involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
-      
+
       (;; are we in the tail, and what is the next tail element to yield?
        (tail-idx (unless (%vec-body vec) 0))
        ;; the path of nodes we walk to reach the current leaf
@@ -945,7 +1182,7 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
                         (repeat (1+ height))
                         (vector-push 0 stack))
                       stack)))
-    
+
     (declare ((or null tail-length) tail-idx))
     (labels ((generate-from-tail ()
                ;; This is a manually inlined `generate-vector' with an additional check for if
@@ -1020,17 +1257,20 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
 ;;; printing vecs
 
 (defmethod print-object ((vec vec) stream)
-  (when (and *print-readably* (not *read-eval*))
-    (error "Unable to readbly print a VEC when *READ-EVAL* is nil."))
-  (when *print-readably*
-    (write-string "#." stream))
-  (write-string "(vec" stream)
-  (with-vec-generator (generator vec)
-    (iter (declare (declare-variables))
-      (repeat (length vec))
-      (write-char #\space stream)
-      (write (advance generator) :stream stream)))
-  (write-string ")" stream))
+  #-(or) (call-next-method)
+  #+(or)
+  (progn
+    (when (and *print-readably* (not *read-eval*))
+      (error "Unable to readbly print a VEC when *READ-EVAL* is nil."))
+    (when *print-readably*
+      (write-string "#." stream))
+    (write-string "(vec" stream)
+    (with-vec-generator (generator vec)
+      (iter (declare (declare-variables))
+        (repeat (length vec))
+        (write-char #\space stream)
+        (write (advance generator) :stream stream)))
+    (write-string ")" stream)))
 
 ;;; converting between cl sequences and vecs
 

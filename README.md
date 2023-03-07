@@ -25,9 +25,9 @@ shadow CL symbols liberally to accomplish this.
   - [x] convert to CL sequences - `to-list` and `to-vector`
   - [x] constructor analogous to `list` and `vector` - `vec`
   - [x] append one to end - `push-back`
-  - [x] pop one from end
+  - [x] pop one from end - `pop-back`
   - [x] append multiple to end - `extend`
-  - [ ] remove multiple from end
+  - [x] remove multiple from end - `retract`
   - [ ] replace element at given index - `replace-at`
   - [ ] convenient iteration constructs
     - [ ] `map` - apply function to each element, collect result to new `vec`
