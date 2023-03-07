@@ -376,3 +376,18 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
                      (vec:ref replaced i))))))
       (write-char #\. *test-dribble*)
       (sync-test-dribble))))
+
+(def-test map-1+-long-integer-vec (:suite immutable-vec-suite)
+  (for-all ((vec (gen-vec :elements (gen-integer :min -128 :max 128)
+                          :length *gen-length-of-height-2-or-3*)))
+    (let* ((mapped (vec:map #'1+ vec)))
+      (quietly
+        (is-vec-valid vec)
+        (is-vec-valid mapped)
+        (is (= (vec:length vec)
+               (vec:length mapped)))
+        (iter (for i below (vec:length vec))
+          (is (= (1+ (vec:ref vec i))
+                 (vec:ref mapped i)))))
+      (write-char #\. *test-dribble*)
+      (sync-test-dribble))))

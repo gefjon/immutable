@@ -33,7 +33,7 @@ shadow CL symbols liberally to accomplish this.
   - [x] replace element at given index - `replace-at`
   - [x] update element at given index by function - `update-at`
   - [ ] convenient iteration constructs
-    - [ ] `map` - apply function to each element, collect result to new `vec`
+    - [x] `map` - apply function to each element, collect result to new `vec`
     - [ ] `for-each` - apply function to each element, discard result
     - [ ] `do` - macro analogous to `dolist`
     - [ ] `iterate` integration?

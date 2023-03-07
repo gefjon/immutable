@@ -2,7 +2,7 @@
   (:import-from :alexandria
                 #:array-index #:array-length #:define-constant #:when-let)
   (:use :cl :iterate #:immutable/%generator)
-  (:shadow #:length #:equal)
+  (:shadow #:length #:equal #:map)
   (:export
    ;; condition classes and accessors
    #:out-of-bounds
@@ -47,6 +47,9 @@
    ;; replace individual elements in a vec
    #:update-at
    #:replace-at
+
+   ;; map function across vec
+   #:map
 
    ;; test if two vectors are equal
    #:equal
@@ -1339,6 +1342,18 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
           (generate-from-tail)
           (generate-from-body)))))
 (declaim (notinline generate-vec call-with-vec-generator))
+
+;;; MAP to map a function across a vec
+
+(declaim (ftype (function ((function (t) (values t &rest t)) vec)
+                          (values vec &optional))
+                map))
+(defun map (f vec)
+  (with-vec-generator (generate vec)
+    (flet ((generate-mapped ()
+             (funcall f (advance generate))))
+      (declare (dynamic-extent #'generate-mapped))
+      (generator-vec (length vec) #'generate-mapped))))
 
 ;;; equality comparison
 
