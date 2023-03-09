@@ -1,8 +1,8 @@
 (uiop:define-package :immutable/vec
   (:import-from :alexandria
-                #:array-index #:array-length #:define-constant #:when-let)
+                #:array-index #:array-length #:define-constant #:when-let #:once-only #:with-gensyms)
   (:use :cl :iterate #:immutable/%generator)
-  (:shadow #:length #:equal #:map)
+  (:shadow #:length #:equal #:map #:do)
   (:export
    ;; condition classes and accessors
    #:out-of-bounds
@@ -50,6 +50,10 @@
 
    ;; map function across vec
    #:map
+
+   ;; iterate over vec
+   #:for-each
+   #:do
 
    ;; test if two vectors are equal
    #:equal
@@ -1349,11 +1353,69 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
                           (values vec &optional))
                 map))
 (defun map (f vec)
+  "Construct a new `vec' by applying F to each element of VEC and collecting the result.
+
+Analogous to `mapcar' or `cl:map', but permitting only one VEC argument.
+
+# Time complexity
+
+This operation is O(N) in the length of VEC."
   (with-vec-generator (generate vec)
     (flet ((generate-mapped ()
              (funcall f (advance generate))))
       (declare (dynamic-extent #'generate-mapped))
       (generator-vec (length vec) #'generate-mapped))))
+
+;;; FOR-EACH to map across a vec without collecting a result
+
+(declaim (ftype (function ((function (t) (values &rest t)) vec)
+                          (values &optional))
+                for-each))
+(defun for-each (f vec)
+  "Apply F to each element of VEC, discarding the result.
+
+Analogous to `cl:map' with result-type of `nil', but permitting only one VEC argument.
+
+# Time complexity
+
+This operation is O(N) in the length of VEC."
+  (with-vec-generator (generate vec)
+    (iter (declare (declare-variables))
+      (repeat (the length (length vec)))
+      (funcall f (advance generate))))
+  (values))
+
+;;; DO, a convenience macro around FOR-EACH
+
+(defmacro do ((element-binding vec) &body body)
+  "Evaluate the BODY for each element of VEC with ELEMENT-BINDING bound to the element.
+
+This is a convenience macro which expands to a `for-each' call."
+  `(flet ((do-function (,element-binding)
+            ,@body))
+     (declare (dynamic-extent #'do-function))
+     (for-each #'do-function
+               ,vec)))
+
+;;; ITERATE integration
+
+(defmacro-driver (for binding in-vec vec &optional with-index (index (gensym "FOR-IN-VEC-INDEX")))
+  "Elements of a `vec'.
+
+# Time complexity
+
+This operation is O(N) in the length of the VEC."
+  (with-gensyms (generator)
+    (let ((kwd (if generate 'generate 'for)))
+      ;; Unfortunately, `generate-vec' here will allocate. For all ITERATE's extensible beauty, I don't
+      ;; believe there is a way for a clause to enclose the entire expansion in a WITH-FOO form, which is what
+      ;; we'd need in order to dx-allocate the generator.
+      `(progn (with ,generator = (generate-vec ,vec))
+              (with ,index = 0)
+              (,kwd ,binding next (if (>= ,index (length ,vec))
+                                      (terminate)
+                                      (progn (incf ,index)
+                                             (advance ,generator))))))))
 
 ;;; equality comparison
 
@@ -1376,20 +1438,17 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
 ;;; printing vecs
 
 (defmethod print-object ((vec vec) stream)
-  #-(or) (call-next-method)
-  #+(or)
-  (progn
-    (when (and *print-readably* (not *read-eval*))
-      (error "Unable to readbly print a VEC when *READ-EVAL* is nil."))
-    (when *print-readably*
-      (write-string "#." stream))
-    (write-string "(vec" stream)
-    (with-vec-generator (generator vec)
-      (iter (declare (declare-variables))
-        (repeat (length vec))
-        (write-char #\space stream)
-        (write (advance generator) :stream stream)))
-    (write-string ")" stream)))
+  (when (and *print-readably* (not *read-eval*))
+    (error "Unable to readbly print a VEC when *READ-EVAL* is nil."))
+  (when *print-readably*
+    (write-string "#." stream))
+  (write-string "(vec" stream)
+  (with-vec-generator (generator vec)
+    (iter (declare (declare-variables))
+      (repeat (length vec))
+      (write-char #\space stream)
+      (write (advance generator) :stream stream)))
+  (write-string ")" stream))
 
 ;;; converting between cl sequences and vecs
 

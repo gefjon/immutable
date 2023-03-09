@@ -32,11 +32,15 @@ shadow CL symbols liberally to accomplish this.
   - [x] remove multiple from end - `retract`
   - [x] replace element at given index - `replace-at`
   - [x] update element at given index by function - `update-at`
-  - [ ] convenient iteration constructs
+  - [x] convenient iteration constructs
     - [x] `map` - apply function to each element, collect result to new `vec`
-    - [ ] `for-each` - apply function to each element, discard result
-    - [ ] `do` - macro analogous to `dolist`
-    - [ ] `iterate` integration?
+    - [x] `for-each` - apply function to each element, discard result
+    - [x] `do` - macro analogous to `dolist`
+    - [x] `iterate` integration - `FOR elt IN-VEC vec`
+    - [ ] sequence keywords
+      - [ ] `start`
+      - [ ] `end`
+      - [ ] `from-end`
   - [x] equality testing - `equal`
   - [ ] hashing?
   - [ ] transients - see [Jean Niklas L'orange's blog post](https://hypirion.com/musings/understanding-clojure-transients)
