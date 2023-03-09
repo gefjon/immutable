@@ -22,6 +22,8 @@ shadow CL symbols liberally to accomplish this.
 - [ ] `vec` - bit-partitioned tries with tails
   - [x] type definition - `vec`
   - [x] indexing - `ref`
+  - [x] examine length - `length`
+    - [x] `emptyp`
   - [x] internal iteration facility - `generate-vec`
   - [x] convert from CL sequences - `from-list` and `from-vector`
   - [x] convert to CL sequences - `to-list` and `to-vector`
@@ -29,6 +31,9 @@ shadow CL symbols liberally to accomplish this.
   - [x] append one to end - `push-back`
   - [x] pop one from end - `pop-back`
   - [x] append multiple to end - `extend`
+    - [x] `extend-from-vector`
+    - [x] `extend-from-list`
+  - [x] concatenate vecs - `concatenate`
   - [x] remove multiple from end - `retract`
   - [x] replace element at given index - `replace-at`
   - [x] update element at given index by function - `update-at`
@@ -109,4 +114,4 @@ shadow CL symbols liberally to accomplish this.
   - [ ] convert from CL strings
   - [ ] convert to CL strings
   - [ ] convenient constructor?
-  - [ ] output to stream without converting to string
+      - [ ] output to stream without converting to string

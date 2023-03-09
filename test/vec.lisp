@@ -171,7 +171,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
       (vec:ref vec (vec:length vec)))
     (sync-test-dribble)))
 
-;;; testing the EXTEND operator
+;;; testing the EXTEND operator and its EXTEND-FROM-FOO friends
 
 (def-test extend-like-append-small-list (:suite immutable-vec-suite)
   (for-all ((start (gen-list :length (gen-integer :min 0 :max 128) :elements (gen-element)))
@@ -262,6 +262,31 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
       (is-each-element whole-vec in-vector whole-vector eql)
       (is (equalp whole-vector (vec:to-vector whole-vec)))
       (sync-test-dribble))))
+
+;;; CONCATENATE, which could be called EXTEND-FROM-VEC
+
+(def-test concatenate-compiler-macro-well-behaved (:suite immutable-vec-suite)
+  (flet ((test-many-times (start-length end-length)
+           (for-all ((start-vec (gen-vec :length start-length
+                                         :elements (gen-integer :min 0 :max most-positive-fixnum)))
+                     (end-vec (gen-vec :length end-length
+                                       :elements (gen-integer :min 0 :max most-positive-fixnum))))
+             (is-vec-valid start-vec)
+             (is-vec-valid end-vec)
+             (let* ((concat-2 (vec:concatenate start-vec end-vec))
+                    (concat-n (locally (declare (notinline vec:concatenate))
+                                (vec:concatenate start-vec end-vec))))
+               (is-vec-valid concat-2)
+               (is-vec-valid concat-n)
+               (is (= (+ (vec:length start-vec) (vec:length end-vec))
+                      (vec:length concat-n)
+                      (vec:length concat-2)))
+               (is (vec:equal concat-n concat-2)))
+             (sync-test-dribble))))
+    (test-many-times (gen-integer :min 16 :max 128)
+                     (gen-integer :min 16 :max 128))
+    (test-many-times (gen-length-of-height 2)
+                     (gen-length-of-height 2))))
 
 ;;; testing the POP-BACK operator
 
@@ -377,6 +402,8 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
       (write-char #\. *test-dribble*)
       (sync-test-dribble))))
 
+;;; testing MAP
+
 (def-test map-1+-long-integer-vec (:suite immutable-vec-suite)
   (for-all ((vec (gen-vec :elements (gen-integer :min -128 :max 128)
                           :length *gen-length-of-height-2-or-3*)))
@@ -391,6 +418,8 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
                  (vec:ref mapped i)))))
       (write-char #\. *test-dribble*)
       (sync-test-dribble))))
+
+;;; testing iteration constructs: FOR-EACH, DO, and the ITER driver
 
 (def-test for-each-slow-count (:suite immutable-vec-suite)
   (flet ((is-count-like-length (vec)
@@ -436,3 +465,20 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
     (for-all ((vec (gen-vec :length *gen-length-of-height-2-or-3*
                             :elements (gen-integer :min 0 :max most-positive-fixnum))))
       (is-count-like-length vec))))
+
+;;; EMPTYP sanity check
+
+(def-test emptyp (:suite immutable-vec-suite)
+  (flet ((is-empty (vec)
+           (is-vec-valid vec)
+           (is (zerop (vec:length vec)))
+           (is (vec:emptyp vec)))
+         (is-not-empty (vec)
+           (is-vec-valid vec)
+           (is (plusp (vec:length vec)))
+           (is (not (vec:emptyp vec)))))
+    (is-empty vec:+empty+)
+    (is-empty (vec:pop-back (vec:vec 0)))
+    (for-all ((vec (gen-vec)))
+      (is-not-empty vec)
+      (is-empty (vec:retract vec (vec:length vec))))))

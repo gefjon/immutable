@@ -2,7 +2,7 @@
   (:import-from :alexandria
                 #:array-index #:array-length #:define-constant #:when-let #:once-only #:with-gensyms)
   (:use :cl :iterate #:immutable/%generator)
-  (:shadow #:length #:equal #:map #:do)
+  (:shadow #:length #:equal #:map #:do #:concatenate)
   (:export
    ;; condition classes and accessors
    #:out-of-bounds
@@ -31,12 +31,18 @@
    ;; reading length (shadowed over CL:LENGTH)
    #:length
 
+   ;; test if vec is empty
+   #:emptyp
+
    ;; append one to end
    #:push-back
 
    ;; append multiple to end
    #:extend
    #:extend-from-list #:extend-from-vector
+
+   ;; append vecs
+   #:concatenate
 
    ;; remove one from end
    #:pop-back
@@ -252,6 +258,12 @@ arguments `:element-type', `:adjustable' and `:fill-pointer' analogous to `make-
 (defun body-length (vec)
   (- (length vec)
      (tail-length vec)))
+
+(declaim (ftype (function (vec) (values boolean &optional))
+                emptyp))
+(defun emptyp (vec)
+  "Returns T if VEC is empty, or `nil' if it contains at least one element."
+  (zerop (length vec)))
 
 (declaim (ftype (function (vec index) (values boolean &optional))
                 index-in-tail-p)
@@ -843,7 +855,7 @@ For M < +BRANCH-RATE+, this operation's amortized time complexity is O((M * log_
 +branch-rate+), because every (+branch-rate+ / M) `extend's will overflow the tail buffer and require
 log_{+branch-rate+}N operations to splice it into the body.
 
-For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-rate+}N)."
+For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-rate+}(M + N))."
   (declare (dynamic-extent new-elements))
   (with-list-generator (elts-generator new-elements)
     (extend-from-generator vec elts-generator (cl:length new-elements))))
@@ -1346,6 +1358,55 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
           (generate-from-tail)
           (generate-from-body)))))
 (declaim (notinline generate-vec call-with-vec-generator))
+
+;;; CONCATENATE to append vecs
+
+(declaim (ftype (function (vec &rest vec) (values vec &optional))
+                concatenate))
+(defun concatenate (vec &rest other-vecs)
+  "Concatenate multiple `vec's.
+
+Returns a new VEC which contains all the elements of VEC, followed by all the elements of the OTHER-VECS in
+order left to right.
+
+# Time complexity
+
+This operation has the same time complexity as `extend', taking the new-elements from the OTHER-VECS.
+
+Let N be the length of VEC, and M be the sum of the lengths of all the OTHER-VECS.
+
+For M < +BRANCH-RATE+, this operation's amortized time complexity is O((M * log_{+branch-rate+}N) /
++branch-rate+), because every (+branch-rate+ / M) `extend's will overflow the tail buffer and require
+log_{+branch-rate+}N operations to splice it into the body.
+
+For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-rate+}(M + N))."
+  (declare (dynamic-extent other-vecs))
+  (let* ((added-length (reduce #'+ other-vecs :key #'length)))
+    (extend-from-generator vec
+                           ;; TODO: figure out how to dx-allocate the generators here
+                           (apply #'concat (mapcar #'generate-vec other-vecs))
+                           added-length)))
+
+;; `concatenate' cannot dx-allocate its new-elements generator because it needs to create an unpredictable
+;; number of `generate-vec' generators and combine them with `concat'. But, when the number of OTHER-VECS is
+;; known, it should be possible to dx-allocate the generators. A compiler macro could conceivably do this for
+;; any known length of OTHER-VECS, but to avoid growing the code size, and more importantly, to avoid arcane
+;; some amount of macro-ology, we'll only optimize for concatenating exactly two vecs together. A compiler
+;; macro on `concatenate' will expand to a call to `concatenate-2' in that case.
+
+(declaim (ftype (function (vec vec) (values vec &optional))
+                concatenate-2))
+(defun concatenate-2 (one two)
+  (with-vec-generator (new-elements two)
+    (extend-from-generator one new-elements (length two))))
+
+(define-compiler-macro concatenate (&whole form vec &rest other-vecs)
+  "When possible, call the more efficient `concatenate-2' instead of `concatenate'.
+
+Also return VEC unchanged if there are no OTHER-VECS."
+  (cond ((null other-vecs) vec)
+        ((null (rest other-vecs)) `(concatenate-2 ,vec ,(first other-vecs)))
+        (:else form)))
 
 ;;; MAP to map a function across a vec
 
