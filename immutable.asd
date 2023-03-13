@@ -2,7 +2,7 @@
   :class :package-inferred-system
   :author "Phoebe Goldman <phoebe@goldman-tribe.org>"
   :version "0.0.1"
-  :depends-on ("immutable/vec")
+  :depends-on ("immutable/vec" "immutable/dict")
   :in-order-to ((test-op (test-op "immutable/test"))))
 
 (defsystem "immutable/test"

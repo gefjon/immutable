@@ -1,7 +1,13 @@
+;;;; VECs, a.k.a. Persistent Vectors, a.k.a. Bit-partitioned Binary Tries with Tails
+;;; See Jean Niklas L'orange's series of blog posts, "Understanding Clojure's Persistent Vectors," for an
+;;; explanation of this data structure.
+;;; https://hypirion.com/musings/understanding-persistent-vector-pt-1
+;;; https://hypirion.com/musings/understanding-persistent-vector-pt-2
+;;; https://hypirion.com/musings/understanding-persistent-vector-pt-3
 (uiop:define-package :immutable/vec
   (:import-from :alexandria
                 #:array-index #:array-length #:define-constant #:when-let #:once-only #:with-gensyms)
-  (:use :cl :iterate #:immutable/%generator)
+  (:use :cl :iterate #:immutable/%generator #:immutable/%simple-vector-utils)
   (:shadow #:length #:equal #:map #:do #:concatenate)
   (:export
    ;; condition classes and accessors
@@ -459,16 +465,6 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
          +branch-rate+)
       t))
 
-(declaim (ftype (function (simple-vector t) (values simple-vector &optional))
-                sv-push-back))
-(defun sv-push-back (vector new-element
-                &aux (new-vector (make-array (1+ (cl:length vector)))))
-  (iter (declare (declare-variables))
-    (for elt in-vector vector with-index idx)
-    (setf (svref new-vector idx) elt))
-  (setf (svref new-vector (cl:length vector)) new-element)
-  new-vector)
-
 (declaim (ftype (function (height) (values length &optional))
                 max-body-length-at-height)
          ;; Inlining `max-body-length-at-height' may allow arithmetic optimizations.
@@ -889,20 +885,6 @@ See `extend' for more information."
 
 ;;; POP-BACK and helpers
 
-(declaim (ftype (function (simple-vector) (values (or null simple-vector) t &optional))
-                sv-pop-back))
-(defun sv-pop-back (simple-vector &aux (len (cl:length simple-vector)))
-  (if (zerop len)
-      (error 'pop-back-empty)
-      (let* ((new-len (1- len))
-             (popped-elt (svref simple-vector new-len)))
-        (values (unless (zerop new-len)
-                  (let* ((new-vector (make-array new-len)))
-                    (iter (for i below new-len)
-                      (setf (svref new-vector i) (svref simple-vector i)))
-                    new-vector))
-                popped-elt))))
-
 (declaim (ftype (function (node height) (values (or null node) full-node height &optional))
                 pop-last-node-from-body))
 (defun pop-last-node-from-body (body height)
@@ -972,17 +954,6 @@ O(log_{+branch-rate+}N) time in the length of the input VEC, and the rest will r
                              popped-element)))))))
 
 ;;; removing multiple with RETRACT (and helpers)
-
-(declaim (ftype (function (simple-vector array-length) (values (or null simple-vector) &optional))
-                sv-retract)
-         (inline sv-retract))
-(defun sv-retract (simple-vector new-length)
-  (unless (zerop new-length)
-    (let* ((new-sv (make-array new-length)))
-      (iter (declare (declare-variables))
-        (for i below new-length)
-        (setf (svref new-sv i) (svref simple-vector i)))
-      new-sv)))
 
 (declaim (ftype (function (tail-length node height) (values tail-buf &optional))
                 extract-tail-from-leftmost-leaf))
@@ -1148,16 +1119,6 @@ i.e. amortized O(1) on small ELTS-TO-REMOVE, and O(log_{+branch_rate+}N) on larg
                           :tail new-tail)))))))
 
 ;;; altering elements at a given index with REPLACE-AT and UPDATE-AT
-
-(declaim (ftype (function (simple-vector array-index (function (t) (values t &rest t)))
-                          (values simple-vector &optional))
-                sv-update-at)
-         ;; inline advantageous because it may allow inlining the update-element function
-         (inline sv-update-at))
-(defun sv-update-at (simple-vector index update-element)
-  (let* ((copy (copy-seq simple-vector)))
-    (setf (svref copy index) (funcall update-element (svref copy index)))
-    copy))
 
 (declaim (ftype (function (height node index (function (t) (values t &rest t)))
                           (values node &optional))

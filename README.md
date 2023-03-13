@@ -74,18 +74,28 @@ shadow CL symbols liberally to accomplish this.
     - [ ] method on `emptyp`
     - [ ] method on `map`
 - [ ] `dict` - hash array mapped tries
-  - [ ] type definition
-    - [ ] generic over hash and equality functions
-  - [ ] lookup
-    - [ ] generic over hash and equality functions
+  - [x] type definition
+    - [x] generic over hash and equality functions
+  - [x] lookup
+    - [x] generic over hash and equality functions
+    - [ ] tests
   - [ ] internal iteration facility
   - [ ] convert from CL collections - `from-hash-table`, `from-alist`?
   - [ ] convert to CL collections - `to-hash-table`, `to-alist`?
   - [ ] convenient constructor macro?
-  - [ ] insert one pair
+  - [x] insert one pair
+    - [ ] tests
   - [ ] insert multiple pairs?
-  - [ ] remove one pair
+  - [x] remove one pair
+    - [ ] tests
   - [ ] remove multiple pairs?
+  - [ ] combine two (or more?) maps - `union`
+    - [ ] check for compatible hash and equality functions
+      - [ ] solve equality testing on arbitrary closures /s
+      - [ ] fall back to `reduce` of `insert` when the hash and equality functions are not `eq`
+      - [ ] structural merge when the hash and equality functions are `eq`
+    - [ ] accept a `merge-entries` function of type `(function (key &rest value) (values
+          value &optional))` to avoid left- or right-bias
   - [ ] convenient iteration constructs
     - [ ] `map-values` - apply function to each value, leaving keys untouched, collect to new `dict`
     - [ ] `for-each` - apply function to each pair, discard result
