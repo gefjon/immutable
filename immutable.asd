@@ -8,6 +8,6 @@
 (defsystem "immutable/test"
   :defsystem-depends-on ((:version "fiveam-asdf" "3.0.1"))
   :class :package-inferred-fiveam-tester-system
-  :depends-on ((:version "uiop" "3.3.4") ; for sbcl package-local-nicknames
+  :depends-on ((:version "uiop" "3.3.5") ; for uiop package-local-nicknames support
                "immutable/test/vec")
   :test-names ((#:immutable-vec-suite . :immutable/test/vec)))
