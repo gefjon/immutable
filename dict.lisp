@@ -8,18 +8,32 @@
 ;;; - We use the low bits of the hash to index into the root table, and progressively higher bits to index
 ;;;   into later nodes, where Bagwell does the opposite. This simplifies our traversal, and has the convenient
 ;;;   side effect that we don't need to check if we've run out of bits in the hash; after that point, LDB will
-;;;   always return all-zeros.
+;;;   always return all-zeros or all-ones, depending on sign.
 (uiop:define-package :immutable/dict
   (:import-from :alexandria
                 #:array-index #:array-length #:define-constant #:when-let #:once-only #:with-gensyms #:if-let)
   (:shadow #:get #:remove)
   (:use :cl :iterate :immutable/%generator :immutable/%simple-vector-utils)
+  (:import-from :immutable/hash
+                #:==
+                #:hash
+                #:unsigned-fixnum)
   (:export
 
+   ;; type definition
    #:dict
+
+   ;; GETHASH analogue
    #:get
+
+   ;; (SETF GETHASH) analogue, but persistent
    #:insert
-   #:remove))
+
+   ;; REMHASH analogue, but persistent
+   #:remove
+
+   ;; MAKE-HASH-TABLE analogue to construct an empty dict
+   #:emtpy))
 (in-package :immutable/dict)
 
 #+immutable-dict-debug
@@ -43,17 +57,10 @@
 
 (deftype size ()
   "The size of a `dict', in number of entries."
-  '(and unsigned-byte fixnum))
-
-(deftype hash ()
-  "A computed hash of an arbitrary object.
-
-TODO: determine more-specific types on platforms for which built-in hashing methods return e.g. (unsigned-byte
-32). E.g. CCL is such an implementation."
-  '(and unsigned-byte fixnum))
+  'unsigned-fixnum)
 
 (deftype hash-function ()
-  '(function (t) (values hash &optional)))
+  '(function (t) (values fixnum &optional)))
 
 (deftype test-function ()
   '(function (t t) (values boolean &optional)))
@@ -113,7 +120,7 @@ equal under the TEST-FUNCTION. Lookup in a `conflict-node' is a linear search of
 
 A `conflict-node' will always contain at least two `value-node's."
   (hash (error "Supply :HASH to %MAKE-CONFLICT-NODE")
-   :type hash)
+   :type fixnum)
   (entries (error "Supply :ENTRIES to %MAKE-CONFLICT-NODE")
    :type simple-vector ;; of VALUE-NODEs
    ))
@@ -126,7 +133,7 @@ A `conflict-node' will always contain at least two `value-node's."
             (:conc-name %value-node-))
   "A leaf node in a `dict' which associates a KEY with a VALUE."
   (hash (error "Supply :HASH to %MAKE-VALUE-NODE")
-   :type hash)
+   :type fixnum)
   (key (error "Supply :KEY to %MAKE-VALUE-NODE"))
   (value (error "Supply :VALUE to %MAKE-VALUE-NODE")))
 
@@ -203,7 +210,7 @@ Precondition: the TRUE-INDEX must have resulted from a valid call to `bitmap-tru
 Precondition: the HASH-NODE must `hash-node-contains-p' the INDEX."
   (hash-node-true-ref hash-node (hash-node-true-index hash-node index)))
 
-(declaim (ftype (function (shift hash) (values hash-node-index))
+(declaim (ftype (function (shift fixnum) (values hash-node-index))
                 extract-hash-part-for-shift))
 (defun extract-hash-part-for-shift (shift hash)
   "Extract a `hash-node-index' from HASH for a `hash-node' at SHIFT, i.e. a hash-node that is SHIFT steps removed from the trie's root."
@@ -211,7 +218,7 @@ Precondition: the HASH-NODE must `hash-node-contains-p' the INDEX."
     (ldb (byte +node-index-bits+ shift-low-bit)
          hash)))
 
-(declaim (ftype (function (node t hash shift test-function t) (values t boolean &optional))
+(declaim (ftype (function (node t fixnum shift test-function t) (values t boolean &optional))
                 node-lookup))
 (defun node-lookup (node key hash shift test-function not-found)
   "Get the value associated with KEY in NODE.
@@ -297,7 +304,7 @@ nil)."
   (%make-hash-node :bitmap (bitmap-from-indices index)
                    :entries (vector entry)))
 
-(declaim (ftype (function (hash &rest value-node) (values conflict-node &optional))
+(declaim (ftype (function (fixnum &rest value-node) (values conflict-node &optional))
                 make-conflict-node))
 (defun make-conflict-node (hash &rest entries)
   (declare (dynamic-extent entries))
@@ -305,9 +312,9 @@ nil)."
                        :entries (coerce entries 'simple-vector)))
 
 (declaim (ftype (function ((or value-node conflict-node)
-                           hash
+                           fixnum
                            (or value-node conflict-node)
-                           hash
+                           fixnum
                            shift)
                           (values hash-node &optional))
                 promote-node))
@@ -331,7 +338,7 @@ Precondition: (/= LEFT-HASH RIGHT-HASH), or else we would construct a unified `c
                                   left-index)
         (make-two-entry-hash-node left-node left-index right-node right-index))))
 
-(declaim (ftype (function (value-node t t hash shift test-function)
+(declaim (ftype (function (value-node t t fixnum shift test-function)
                           (values node &optional))
                 insert-into-value-node))
 (defun insert-into-value-node (neighbor-node key value hash shift test-function)
@@ -372,7 +379,7 @@ Precondition: NEW-ENTRY has the same hash as CONFLICT-NODE, and no existing entr
   (%make-conflict-node :hash (%conflict-node-hash conflict-node)
                        :entries (sv-push-back (%conflict-node-entries conflict-node) new-entry)))
 
-(declaim (ftype (function (conflict-node t t hash shift test-function)
+(declaim (ftype (function (conflict-node t t fixnum shift test-function)
                           (values node &optional))
                 insert-into-conflict-node))
 (defun insert-into-conflict-node (conflict-node key value hash shift test-function)
@@ -428,7 +435,7 @@ contain both the existing CONFLICT-NODE and the new entry."
                                             true-index
                                             child))))
 
-(declaim (ftype (function (hash-node t t hash shift test-function)
+(declaim (ftype (function (hash-node t t fixnum shift test-function)
                           (values node &optional))
                 insert-into-hash-node))
 (defun insert-into-hash-node (hash-node key value hash shift test-function)
@@ -452,7 +459,7 @@ contain both the existing CONFLICT-NODE and the new entry."
                                             :value value)
                           index))))
 
-(declaim (ftype (function (node t t hash shift test-function) (values node &optional))
+(declaim (ftype (function (node t t fixnum shift test-function) (values node &optional))
                 node-insert))
 (defun node-insert (node key value hash shift test-function)
   "Make KEY map to VALUE within NODE.
@@ -552,7 +559,7 @@ be a one-entry `hash-node'."
                                       index-to-remove
                                       true-index-to-remove)))))
 
-(declaim (ftype (function (hash-node t hash shift test-function)
+(declaim (ftype (function (hash-node t fixnum shift test-function)
                           (values (or null node) &optional))
                 remove-from-hash-node))
 (defun remove-from-hash-node (hash-node key hash shift test-function)
@@ -584,7 +591,7 @@ be a one-entry `hash-node'."
                  (hash-node-replace-at-true-index hash-node true-index new-child))))
         hash-node)))
 
-(declaim (ftype (function (node t hash shift test-function) (values (or null node) &optional))
+(declaim (ftype (function (node t fixnum shift test-function) (values (or null node) &optional))
                 node-remove))
 (defun node-remove (node key hash shift test-function)
   "Make KEY unmapped within NODE.
@@ -636,3 +643,111 @@ If DICT does not contain a mapping for KEY, the returned `dict' will be `eq' to 
                           :body new-body
                           :hash-function hash-function
                           :test-function test-function))))))
+
+;;; finding appropriate hash functions for a given test function
+
+(declaim (dict *test-hash-functions*))
+(defparameter *test-hash-functions*
+  (%make-dict :size 0
+              :body nil
+              :test-function #'eq
+              :hash-function (lambda (fun)
+                               (declare (symbol fun))
+                               ;; `sxhash' on symbols is like `eq-hash'
+                               (sxhash fun)))
+  "Maps symbols which name test functions to function objects which are `hash-function's.")
+
+(deftype function-designator ()
+  '(or (and symbol (not (or keyword boolean)))
+    function))
+
+(declaim (ftype (function (function-designator) (values function &optional))
+                coerce-to-function))
+(defun coerce-to-function (function-designator)
+  (etypecase function-designator
+    ((and symbol (not keyword)) (symbol-function function-designator))
+    (function function-designator)))
+
+(declaim (ftype (function ((and symbol (not keyword) (not boolean))
+                           function-designator)
+                          (values &optional))
+                register-test-hash-function))
+(defun register-test-hash-function (test-function hash-function)
+  ;; TODO: Make this an atomic-swap when available? Does anyone compile CL source files in parallel?
+  (setf *test-hash-functions*
+        (insert *test-hash-functions*
+                test-function
+                (coerce-to-function hash-function)))
+  (values))
+
+(defmacro define-test-hash-function (test-function hash-function)
+  (check-type test-function (and function-designator symbol)
+              "a symbol which names a test function")
+  (check-type hash-function (or (and function-designator symbol)
+                                (cons (member lambda function)))
+              "a symbol which names a hash function, or a LAMBDA or FUNCTION expression")
+  (flet ((maybe-quote (thing)
+           (if (symbolp thing)
+               `',thing
+               thing)))
+    `(register-test-hash-function ',test-function ,(maybe-quote hash-function))))
+
+(define-test-hash-function equal sxhash)
+
+(define-test-hash-function == hash)
+
+;; TODO: Figure out if it's possible to extract (EQ|EQL|EQUALP)-HASH from implementations' hash-table impls.
+;;       SBCL's `sb-impl::eq-hash' is probably impossible to use, because a moving gc will change objects'
+;;       hashes. The SBCL impl of hash tables seem to hack around this by pinning objects. (See
+;;       sbcl/src/code/target-hash-table.lisp#L1678, in the definition of DEFINE-HT-SETTER.)
+
+
+(define-condition no-hash-function-for-test (error)
+  ((%test-function :type t
+                   :initarg :test-function
+                   :reader no-hash-function-for-test-function)
+   (%known-test-hash-functions :type dict
+                               :initarg :known-test-hash-functions
+                               :reader no-hash-function-for-test-known-test-hash-functions))
+  (:report (lambda (c s)
+             ;; TODO: print the KNOWN-TEST-HASH-FUNCTIONS, once we have a way to print dicts
+             (format s "Don't know how to find an appropriate :HASH-FUNCTION for the :TEST-FUNCTION ~s.
+
+IMMUTABLE/DICT can only automatically deduce :HASH-FUNCTIONs when the :TEST-FUNCTION is a symbol, and then only for a small number of known :TEST-FUNCTIONs."
+                     (no-hash-function-for-test-function c)))))
+
+(declaim (ftype (function ((and function-designator symbol)) (values hash-function &optional))
+                test-hash-function))
+(defun test-hash-function (test-function)
+  (multiple-value-bind (hash-function presentp)
+      (get *test-hash-functions* test-function)
+    (unless presentp
+      (error 'no-hash-function-for-test
+             :test-function test-function
+             :known-test-hash-functions *test-hash-functions*))
+    hash-function))
+
+;;; EMPTY constructor
+
+(declaim (ftype (function (&key (:test-function (or (and symbol (not keyword) (not boolean))
+                                                    test-function))
+                                (:hash-function (or null
+                                                    (and symbol (not keyword) (not boolean))
+                                                    hash-function)))
+                          (values dict &optional))
+                empty))
+(defun empty (&key (test-function '==)
+                (hash-function nil))
+  (let* ((hash-function (coerce-to-function (cond (hash-function
+                                                   (coerce-to-function hash-function))
+                                                  ((symbolp test-function)
+                                                   (test-hash-function test-function))
+                                                  (:else
+                                                   (error 'no-hash-function-for-test
+                                                          :test-function test-function
+                                                          :known-test-hash-functions *test-hash-functions*)))))
+         (test-function (coerce-to-function test-function)))
+    (%make-dict :size 0
+                :body nil
+                :hash-function hash-function
+                :test-function test-function)))

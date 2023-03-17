@@ -1,5 +1,5 @@
 (uiop:define-package :immutable/test/vec
-  (:use :cl :fiveam :iterate)
+  (:use :cl :fiveam :iterate :immutable/test/utils)
   (:import-from :alexandria
                 #:once-only #:with-gensyms)
   (:local-nicknames (#:vec :immutable/vec)
@@ -13,47 +13,11 @@
 
 ;;; helpers
 
-(defun call-quietly (thunk)
-  "Call THUNK in a context where FiveAM produces no text output for checks.
-
-Useful for comparing each element of a VEC against the corresponding element of its source data, to avoid
-printing a large number of dots to *TEST-DRIBBLE*."
-  (let* ((*test-dribble* (make-broadcast-stream)))
-    (unwind-protect (funcall thunk)
-      (close *test-dribble*))))
-
-(defmacro quietly (&body body)
-  "Evaluate BODY in a context where FiveAM produces no text output for checks.
-
-Useful for comparing each element of a VEC against the corresponding element of its source data, to avoid
-printing a large number of dots to *TEST-DRIBBLE*."
-  `(call-quietly (lambda () ,@body)))
-
-(defun gen-element (&key (generators (list (gen-string) (gen-list) (gen-tree) (gen-character) (gen-float) (gen-integer))))
-  "Generate a value of essentially arbitrary type, to be compared with EQL."
-  (let* ((get-generator (apply #'gen-one-element generators)))
-    (lambda ()
-      (funcall (funcall get-generator)))))
-
-(defun gen-simple-vector (&key (length (gen-integer :min 16 :max 128))
-                            (elements (gen-element)))
-  "Generate a SIMPLE-VECTOR, with length chosen from the LENGTH generator, and elements chosen from the ELEMENTS generator."
-  (lambda ()
-    (let* ((this-length (funcall length))
-           (arr (make-array this-length)))
-      (iter (for i below this-length)
-        (setf (svref arr i)
-              (funcall elements)))
-      arr)))
-
 (defun gen-vec (&key (length (gen-integer :min 16 :max 128))
-                  (elements (gen-element)))
+                  (elements *gen-fixnum*))
   "Generate a random vec with length taken from the LENGTH generator and elements taken from the ELEMENTS generator."
   (lambda ()
     (vec::generator-vec (funcall length) elements)))
-
-(defun sync-test-dribble ()
-  (force-output *test-dribble*))
 
 (defmacro is-each-element (vec in sequence pred)
   "Assert that each element in VEC is PRED to the corresponding element of SEQUENCE.
@@ -99,11 +63,9 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
 
 ;;; testing round-trips between CL data structures and vecs
 
-;; the -SMALL- tests use GEN-ELEMENT of (relatively) arbitrary type, which makes generation somewhat slow.
-
 (def-test round-trip-small-lists (:suite immutable-vec-suite)
   (for-all ((list (gen-list :length (gen-integer :min 16 :max 128)
-                            :elements (gen-element))))
+                            :elements *gen-fixnum*)))
     (let* ((vec (vec:from-list list)))
       (is-vec-valid vec)
       (is-each-element vec in list eql)
@@ -117,9 +79,6 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
       (is-each-element vec in-vector vector eql)
       (is (equalp vector (vec:to-vector vec)))
       (sync-test-dribble))))
-
-;; the -LARGE- tests use GEN-INTEGER to generate elements, which makes generation relatively fast, to
-;; compensate for the much larger data being generated and processed.
 
 (defun max-length-at-height (height)
   (+ (vec::max-body-length-at-height height)
@@ -174,8 +133,8 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
 ;;; testing the EXTEND operator and its EXTEND-FROM-FOO friends
 
 (def-test extend-like-append-small-list (:suite immutable-vec-suite)
-  (for-all ((start (gen-list :length (gen-integer :min 0 :max 128) :elements (gen-element)))
-            (end (gen-list :length (gen-integer :min 0 :max 128) :elements (gen-element))))
+  (for-all ((start (gen-list :length (gen-integer :min 0 :max 128) :elements *gen-fixnum*))
+            (end (gen-list :length (gen-integer :min 0 :max 128) :elements *gen-fixnum*)))
     (let* ((start-vec (vec:from-list start))
            (whole-vec (vec:extend-from-list start-vec end))
            (whole-list (append start end)))
@@ -305,7 +264,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
     (is-id (vec:vec) 0)
     (is-id (vec:vec 0) 1)
     (for-all ((vec (gen-vec))
-              (next-elt (gen-element)))
+              (next-elt *gen-fixnum*))
       (is-id vec next-elt))))
 
 (def-test pop-back-empty-error (:suite immutable-vec-suite)

@@ -73,12 +73,45 @@ shadow CL symbols liberally to accomplish this.
     - [ ] no-op method on `copy-seq`
     - [ ] method on `emptyp`
     - [ ] method on `map`
+- [ ] `hash` - generic hashing and equality for use by `dict`
+  - [x] core FxHash algorithm
+  - [ ] hashing and equality for builtin types, and tests
+    - [x] `fixnum`
+    - [x] `integer`
+    - [x] `float`
+      - [x] `single-float`
+      - [x] `double-float`
+      - [x] do implementations with `short-float` and `long-float` actually exist?
+    - [x] `character`
+    - [x] `complex`
+    - [x] `ratio`
+    - [x] `vector`
+      - [x] `string`
+        - [x] `simple-base-string`
+        - [x] `base-string`
+        - [x] `simple-string`
+        - [x] generic `string`
+      - [x] `bit-vector`
+        - [x] `simple-bit-vector`
+        - [x] generic `bit-vector`
+      - [x] `simple-vector`
+      - [x] generic `vector`
+    - [x] `array`
+    - [x] `cons`
+    - [x] `symbol`
+    - [ ] generic function for user-defined methods
+      - [ ] MOP-ey default method for `standard-object` and `condition`
+  - [x] `==` wrapper
+  - [x] `hash` wrapper which returns `unsigned-fixnum`
 - [ ] `dict` - hash array mapped tries
   - [x] type definition
     - [x] generic over hash and equality functions
   - [x] lookup
     - [x] generic over hash and equality functions
     - [ ] tests
+  - [ ] define a hash function
+    - [ ] efficient dispatch on known types
+    - [ ] fallback to a CLOS method for user-defined types
   - [ ] internal iteration facility
   - [ ] convert from CL collections - `from-hash-table`, `from-alist`?
   - [ ] convert to CL collections - `to-hash-table`, `to-alist`?
@@ -88,6 +121,7 @@ shadow CL symbols liberally to accomplish this.
   - [ ] insert multiple pairs?
   - [x] remove one pair
     - [ ] tests
+  - [ ] test that same hash and test functions imply same structure after various operations
   - [ ] remove multiple pairs?
   - [ ] combine two (or more?) maps - `union`
     - [ ] check for compatible hash and equality functions
