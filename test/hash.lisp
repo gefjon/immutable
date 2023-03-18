@@ -2,8 +2,7 @@
   (:use :cl :fiveam :iterate :immutable/test/utils)
   (:import-from :trivial-garbage
                 #:gc)
-  (:local-nicknames (#:hash :immutable/hash)
-                    (#:float :float-features))
+  (:local-nicknames (#:hash :immutable/hash))
   (:export #:immutable-hash-suite))
 (in-package :immutable/test/hash)
 
@@ -106,10 +105,11 @@
                                             (lambda (x)
                                               (complex x x)))))
 
-(defun without-float-traps (thunk)
+(defun without-float-traps (thunk &optional (default 0))
+  "Wrap THUNK in code that arranges to return DEFAULT instead of signaling an error on an invalid operation, e.g. float overflow."
   (lambda (&rest stuff)
-    (float:with-float-traps-masked t
-      (apply thunk stuff))))
+    (handler-case (apply thunk stuff)
+      (arithmetic-error () default))))
 
 (def-test hash-floats (:suite immutable-hash-suite)
   (declare (optimize (debug 3) (space 1) (speed 1) (safety 3)))
