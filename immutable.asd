@@ -12,6 +12,8 @@
   :class :package-inferred-fiveam-tester-system
   :depends-on ((:version "uiop" "3.3.5") ; for uiop package-local-nicknames support
                "immutable/test/vec"
-               "immutable/test/hash")
+               "immutable/test/hash"
+               "immutable/test/dict")
   :test-names ((#:immutable-vec-suite . #:immutable/test/vec)
-               (#:immutable-hash-stuie . #:immutable/test/hash)))
+               (#:immutable-hash-stuie . #:immutable/test/hash)
+               (#:immutable-dict-suite . #:immutable/test/dict)))

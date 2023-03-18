@@ -23,6 +23,9 @@
    ;; type definition
    #:dict
 
+   ;; number of elements
+   #:size
+
    ;; GETHASH analogue
    #:get
 
@@ -33,7 +36,7 @@
    #:remove
 
    ;; MAKE-HASH-TABLE analogue to construct an empty dict
-   #:emtpy))
+   #:empty))
 (in-package :immutable/dict)
 
 #+immutable-dict-debug
@@ -157,6 +160,14 @@ A `conflict-node' will always contain at least two `value-node's."
    :type test-function)
   (body (error "Supply :BODY to %MAKE-DICT")
    :type (or null node)))
+
+;;; accessors
+
+(declaim (ftype (function (dict) (values size &optional))
+                size)
+         (inline size))
+(defun size (dict)
+  (%dict-size dict))
 
 ;;; lookup with GET
 
@@ -448,7 +459,7 @@ contain both the existing CONFLICT-NODE and the new entry."
                                             key
                                             value
                                             hash
-                                            shift
+                                            (1+ shift)
                                             test-function)))
           (hash-node-replace-at hash-node index inserted-child))
 
