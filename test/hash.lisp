@@ -2,7 +2,8 @@
   (:use :cl :fiveam :iterate :immutable/test/utils)
   (:import-from :trivial-garbage
                 #:gc)
-  (:local-nicknames (#:hash :immutable/hash))
+  (:local-nicknames (#:hash :immutable/hash)
+                    (#:float :float-features))
   (:export #:immutable-hash-suite))
 (in-package :immutable/test/hash)
 
@@ -105,7 +106,13 @@
                                             (lambda (x)
                                               (complex x x)))))
 
+(defun without-float-traps (thunk)
+  (lambda (&rest stuff)
+    (float:with-float-traps-masked t
+      (apply thunk stuff))))
+
 (def-test hash-floats (:suite immutable-hash-suite)
+  (declare (optimize (debug 3) (space 1) (speed 1) (safety 3)))
   (dolist (float-type (list *gen-short-float* *gen-single-float* *gen-long-float* *gen-double-float*))
     (are-hash-and-==-consistent float-type
                                 :id (list #'+
@@ -113,18 +120,23 @@
                                           #'float
                                           (lambda (x) (coerce (coerce x 'long-float) (type-of x)))
                                           (lambda (x) (float (rationalize x) x)))
+                                ;; For all of these NOT-ID functions, we don't really care about getting a
+                                ;; valid numeric result out (though we'd prefer it, as detecting collisions
+                                ;; with a number is more interesting than detecting collisions with NaN or
+                                ;; Inf), so we mask float traps instead of worrying about overflow.
                                 :not-id (list #'-
                                               #'/
-                                              #'exp
-                                              #'log
+                                              (without-float-traps #'exp)
+                                              (without-float-traps #'log)
                                               #'rational
                                               #'rationalize
-                                              (lambda (x)
-                                                (etypecase x
-                                                  (short-float (coerce x 'long-float))
-                                                  (single-float (coerce x 'double-float))
-                                                  (double-float (coerce x 'single-float))
-                                                  (long-float (coerce x 'short-float))))))))
+                                              (without-float-traps
+                                                  (lambda (x)
+                                                    (etypecase x
+                                                      (short-float (coerce x 'long-float))
+                                                      (single-float (coerce x 'double-float))
+                                                      (double-float (coerce x 'single-float))
+                                                      (long-float (coerce x 'short-float)))))))))
 
 (def-test hash-character (:suite immutable-hash-suite)
   (are-hash-and-==-consistent (gen-character)
@@ -176,14 +188,16 @@
     (are-hash-and-==-consistent (gen-complex gen-part)
                                 :id (list (lambda (x) (complex (realpart x)
                                                                (imagpart x))))
-                                :not-id (list #'/
-                                              #'-
-                                              (lambda (x)
-                                                (* x 2))
-                                              (lambda (x)
-                                                (* x (complex 0 2)))
-                                              (lambda (x)
-                                                (* x (complex 2 2)))))))
+                                ;; For all of these not-id functions, we don't actually care about 
+                                :not-id (mapcar #'without-float-traps
+                                                (list #'/
+                                                      #'-
+                                                      (lambda (x)
+                                                        (* x 2))
+                                                      (lambda (x)
+                                                        (* x (complex 0 2)))
+                                                      (lambda (x)
+                                                        (* x (complex 2 2))))))))
 
 ;;; vectors, strings and arrays
 
