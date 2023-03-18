@@ -120,10 +120,11 @@
                                           #'float
                                           (lambda (x) (coerce (coerce x 'long-float) (type-of x)))
                                           (lambda (x) (float (rationalize x) x)))
-                                ;; For all of these NOT-ID functions, we don't really care about getting a
-                                ;; valid numeric result out (though we'd prefer it, as detecting collisions
-                                ;; with a number is more interesting than detecting collisions with NaN or
-                                ;; Inf), so we mask float traps instead of worrying about overflow.
+                                ;; For all of these NOT-ID functions, we don't really care about getting the
+                                ;; mathematically correct result out (though we'd prefer it, as detecting
+                                ;; collisions with the result of some math is more interesting than detecting
+                                ;; collisions with the fixnum 0), so we install a handler using
+                                ;; `without-float-traps' instead of worrying about overflow.
                                 :not-id (list #'-
                                               #'/
                                               (without-float-traps #'exp)
@@ -170,11 +171,6 @@
                                 :id ids
                                 :not-id not-ids)))
 
-(defun gen-complex (gen-part)
-  (lambda ()
-    (complex (funcall gen-part)
-             (funcall gen-part))))
-
 (def-test hash-complex (:suite immutable-hash-suite)
   (dolist (gen-part (list *gen-fixnum*
                           *gen-bignum*
@@ -188,7 +184,11 @@
     (are-hash-and-==-consistent (gen-complex gen-part)
                                 :id (list (lambda (x) (complex (realpart x)
                                                                (imagpart x))))
-                                ;; For all of these not-id functions, we don't actually care about 
+                                ;; For all of these NOT-ID functions, we don't really care about getting the
+                                ;; mathematically correct result out (though we'd prefer it, as detecting
+                                ;; collisions with the result of some math is more interesting than detecting
+                                ;; collisions with the fixnum 0), so we install a handler using
+                                ;; `without-float-traps' instead of worrying about overflow.
                                 :not-id (mapcar #'without-float-traps
                                                 (list #'/
                                                       #'-
