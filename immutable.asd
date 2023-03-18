@@ -15,5 +15,5 @@
                "immutable/test/hash"
                "immutable/test/dict")
   :test-names ((#:immutable-vec-suite . #:immutable/test/vec)
-               (#:immutable-hash-stuie . #:immutable/test/hash)
+               (#:immutable-hash-suite . #:immutable/test/hash)
                (#:immutable-dict-suite . #:immutable/test/dict)))
