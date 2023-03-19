@@ -31,16 +31,17 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
 
 (defun is-body-balanced-and-length-in-elts (body height)
   (if (zerop height)
-      (progn (is (typep body `(simple-vector ,vec::+branch-rate+))
+      (progn (is (typep body 'vec::full-node)
                  "Expected node of height zero to be a ~a but found ~a"
-                 `(simple-vector ,vec::+branch-rate+)
+                 'vec::full-node
                  body)
              vec::+branch-rate+)
       (progn
-        (is (typep body 'simple-vector))
-        (is (>= vec::+branch-rate+ (length body)))
-        (is (< 0 (length body)))
-        (iter (for child in-vector body)
+        (is (typep body 'vec::node))
+        (is (>= vec::+branch-rate+ (vec::node-length body)))
+        (is (< 0 (vec::node-length body)))
+        (iter (for idx below (vec::node-length body))
+          (for child = (vec::node-ref body idx))
           (summing (is-body-balanced-and-length-in-elts child (1- height)))))))
 
 (defun is-vec-valid (vec)
@@ -53,10 +54,10 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
                                   (is-body-balanced-and-length-in-elts body height)
                                   0)))
       (when tail
-        (is (typep tail 'simple-vector))
-        (is (>= vec::+branch-rate+ (length tail)))
-        (is (< 0 (length tail))))
-      (is (= length (+ found-body-length (length tail))))))
+        (is (typep tail 'vec::node))
+        (is (>= vec::+branch-rate+ (vec::node-length tail)))
+        (is (< 0 (vec::node-length tail))))
+      (is (= length (+ found-body-length (vec::tail-buf-length tail))))))
   vec)
 
 ;;; testing round-trips between CL data structures and vecs
