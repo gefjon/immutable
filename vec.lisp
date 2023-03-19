@@ -121,24 +121,39 @@ Height of N means that the current node's elements have height (1- N)."
 (deftype index ()
   `(integer 0 (,+max-length+)))
 
-(deftype node ()
-  `(or ,@(iter (declare (declare-variables))
-           (for (the array-length i) from 1 to +branch-rate+)
-           (collect `(simple-vector ,i)))))
+(deftype transient-id ()
+  '(and fixnum unsigned-byte))
+
+(define-vector-struct node
+    (:max-length #.+branch-rate+
+     :conc-name %node-
+     :logical-index-to-true-index node-logical-index-to-true-index
+     :logical-length-to-true-length node-logical-length-to-true-length)
+  (transient-id :type (or null transient-id)
+                :initform nil))
+
+(define-generator node ((node node))
+                  "Children of a `node'"
+    ((idx 0))
+  (declare ((or (eql 0) node-length) idx))
+  (if (< idx (node-length node))
+      (prog1 (node-ref node idx)
+        (incf idx))
+      (done)))
 
 (deftype full-node ()
-  `(simple-vector ,+branch-rate+))
+  `(and node (simple-vector
+              ;; 1 for the number of named slots in `define-vector-struct'. This is not a call to
+              ;; `node-logical-length-to-true-length' because of `eval-when' concerns.
+              ,(1+ +branch-rate+))))
 
 ;; constructing nodes
 
 (declaim (ftype (function (generator node-length) (values node &optional))
                 alloc-node))
 (defun alloc-node (contents-iterator length-in-children)
-  (let* ((arr (make-array length-in-children)))
-    (iter (declare (declare-variables))
-      (for (the fixnum i) below length-in-children)
-      (setf (svref arr (the array-index i)) (advance contents-iterator)))
-    arr))
+  (make-node :length length-in-children
+             :initial-contents contents-iterator))
 
 (deftype node-index ()
   `(integer 0 (,+branch-rate+)))
@@ -247,7 +262,7 @@ arguments `:element-type', `:adjustable' and `:fill-pointer' analogous to `make-
          (inline tail-buf-length))
 (defun tail-buf-length (tail-buf)
   (if tail-buf
-      (cl:length tail-buf)
+      (node-length tail-buf)
       0))
 
 (declaim (ftype (function (vec) (values tail-length &optional))
@@ -285,7 +300,7 @@ Does not necessarily imply that IDX is in-bounds for VEC."
          (inline tailref))
 (defun tailref (vec idx)
   "Read from the tail of VEC. IDX must be in-bounds for VEC, and must be `index-in-tail-p'."
-  (svref (%vec-tail vec) (- idx (body-length vec))))
+  (node-ref (%vec-tail vec) (- idx (body-length vec))))
 
 (declaim (ftype (function (height index) (values node-index index &optional))
                 extract-index-parts-for-height)
@@ -305,9 +320,9 @@ Does not necessarily imply that IDX is in-bounds for VEC."
 IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher than
 (* (1+ height) +node-index-bits+) and must not pass into an unallocated node."
   (if (zerop height)
-      (svref body idx)
+      (node-ref body idx)
       (multiple-value-bind (curr remaining) (extract-index-parts-for-height height idx)
-        (trieref (svref body curr) (1- height) remaining))))
+        (trieref (node-ref body curr) (1- height) remaining))))
 
 (declaim (ftype (function (vec index) (values t &optional))
                 bodyref)
@@ -408,6 +423,12 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
       nil
       (alloc-node contents tail-length)))
 
+(declaim (ftype (function (t) (values tail-buf &optional))
+                make-one-element-tail))
+(defun make-one-element-tail (element)
+  (make-node :length 1
+             :initial-element element))
+
 ;;; constructing vecs
 
 (declaim (type vec +empty+))
@@ -461,7 +482,7 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
          (inline tail-has-room-p))
 (defun tail-has-room-p (tail)
   (if tail
-      (< (cl:length tail)
+      (< (tail-buf-length tail)
          +branch-rate+)
       t))
 
@@ -487,7 +508,7 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
         ((null trie) (wrap-in-spine height new-node))
         (t
          (locally (declare (node trie)) ; for some reason, sbcl doesn't infer this, at least on 2.2.11
-           (let* ((length-before-in-elts (- new-length-in-elts (cl:length new-node)))
+           (let* ((length-before-in-elts (- new-length-in-elts (node-length new-node)))
                   (elts-per-node (elts-per-node-at-height (1- height)))
                   (new-length-in-nodes (ceiling new-length-in-elts
                                                 elts-per-node))
@@ -497,13 +518,13 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
              (declare (node-length new-length-in-nodes
                                    length-before-in-nodes
                                    last-node-length-in-nodes))
-             (with-vector-generator (trie-generator trie)
+             (with-node-generator (trie-generator trie)
                (alloc-node (concat (take trie-generator length-before-in-nodes)
-                                   (generate-these (if (= length-before-in-nodes (cl:length trie))
+                                   (generate-these (if (= length-before-in-nodes (node-length trie))
                                                        ;; new node is the leftmost in its subtree
                                                        (wrap-in-spine (1- height) new-node)
                                                        ;; new node has siblings
-                                                       (grow-trie (svref trie length-before-in-nodes)
+                                                       (grow-trie (node-ref trie length-before-in-nodes)
                                                                   new-node
                                                                   (1- height)
                                                                   last-node-length-in-nodes))))
@@ -528,7 +549,7 @@ O(log_{+brach-rate+}N) time in the length of the input VEC, and the rest will ru
     (cond ((not tail)
            ;; super fast path when you have no tail: grow a tail
            (copy-vec vec
-                     :tail (vector new-element)
+                     :tail (make-one-element-tail new-element)
                      :length (1+ length)))
           ((tail-has-room-p tail)
            ;; fast path when your tail is short: make it longer
@@ -544,7 +565,7 @@ O(log_{+brach-rate+}N) time in the length of the input VEC, and the rest will ru
                      :body (alloc-node (generate-these body
                                                        (wrap-in-spine height tail))
                                        2)
-                     :tail (vector new-element)))
+                     :tail (make-one-element-tail new-element)))
           (t
            ;; slow path when tail is full but body is not: move your full tail into your not-full body, then
            ;; grow a new tail.
@@ -552,7 +573,7 @@ O(log_{+brach-rate+}N) time in the length of the input VEC, and the rest will ru
                      :height height
                      :length (1+ length)
                      :body (grow-trie body tail height length)
-                     :tail (vector new-element))))))
+                     :tail (make-one-element-tail new-element))))))
 
 ;;; adding multiple elements with EXTEND (and helpers)
 
@@ -642,7 +663,7 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
   (let* ((child-height (1- height))
          (elts-per-full-child (elts-per-node-at-height child-height))
          (num-full-leading-children (floor current-length-in-elts elts-per-full-child))
-         (partial-child-p (not (= num-full-leading-children (cl:length not-full-node))))
+         (partial-child-p (not (= num-full-leading-children (node-length not-full-node))))
          (length-in-children (trie-length-in-nodes-at-height target-length-in-elts
                                                              child-height)))
     (declare (height child-height)
@@ -652,7 +673,7 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
     (if (not partial-child-p)
         ;; If all our children are full, this operation is easy: construct a new node which has all of the
         ;; existing children, followed by new nodes taken from the NEW-ELEMENTS.
-        (with-vector-generator (existing-children-generator not-full-node)
+        (with-node-generator (existing-children-generator not-full-node)
           (alloc-node (concat existing-children-generator
                               (child-nodes-generator child-height
                                                      (- target-length-in-elts current-length-in-elts)
@@ -688,9 +709,9 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                            available-new-elts
                            filled-partial-existing-child-length-in-elts
                            new-children-length-in-elts))
-          (with-vector-generator (existing-children-generator not-full-node)
+          (with-node-generator (existing-children-generator not-full-node)
             (alloc-node (concat (take existing-children-generator num-full-leading-children)
-                                (generate-these (extend-node-at-height (svref not-full-node num-full-leading-children)
+                                (generate-these (extend-node-at-height (node-ref not-full-node num-full-leading-children)
                                                                        child-height
                                                                        partial-existing-child-length-in-elts
                                                                        new-elements
@@ -726,7 +747,7 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
          (inline generate-tail))
 (defun generate-tail (tail-buf)
   (if tail-buf
-      (generate-vector tail-buf)
+      (generate-node tail-buf)
       (lambda () (done))))
 
 (declaim (ftype (function (vec generator length) (values vec &optional))
@@ -892,9 +913,9 @@ See `extend' for more information."
          ;; height is zero: current body becomes tail, resulting body is empty
          (values nil body 0))
 
-        ((= (cl:length body) 1)
+        ((= (node-length body) 1)
          ;; only one child: pop from child, decrease height
-         (pop-last-node-from-body (svref body 0) (1- height)))
+         (pop-last-node-from-body (node-ref body 0) (1- height)))
 
         ((= height 1)
          ;; direct children are leaves: do a SV-POP-BACK to extract the last node
@@ -905,18 +926,25 @@ See `extend' for more information."
         (:otherwise
          ;; recurse to remove a tail from your last child
          (let* ((child-height (1- height))
-                (num-children (cl:length body))
+                (num-children (node-length body))
                 (num-copied-children (1- num-children)))
            (multiple-value-bind (new-last-child new-tail new-last-child-height)
-               (pop-last-node-from-body (svref body num-copied-children)
+               (pop-last-node-from-body (node-ref body num-copied-children)
                                         child-height)
-             (with-vector-generator (children-generator body)
+             (with-node-generator (children-generator body)
                (values (alloc-node (concat (take children-generator num-copied-children)
                                            (generate-these (wrap-in-spine (- child-height new-last-child-height)
                                                                           new-last-child)))
                                    num-children)
                        new-tail
                        height)))))))
+
+(declaim (ftype (function (node) (values tail-buf t &optional))
+                tail-pop-back))
+(defun tail-pop-back (tail)
+  (if (= 1 (node-length tail))
+      (values nil (node-ref tail 0))
+      (sv-pop-back tail)))
 
 (declaim (ftype (function (vec) (values vec t &optional))
                 pop-back))
@@ -938,7 +966,7 @@ O(log_{+branch-rate+}N) time in the length of the input VEC, and the rest will r
       vec
     (cond ((zerop length) (error 'pop-back-empty))
           (tail (multiple-value-bind (new-tail popped-element)
-                    (sv-pop-back tail)
+                    (tail-pop-back tail)
                   (values (copy-vec vec
                                     :length (1- length)
                                     :tail new-tail)
@@ -955,12 +983,20 @@ O(log_{+branch-rate+}N) time in the length of the input VEC, and the rest will r
 
 ;;; removing multiple with RETRACT (and helpers)
 
+(declaim (ftype (function (node (or (eql 0) node-length)) (values (or null node) &optional))
+                node-retract)
+         (inline node-retract))
+(defun node-retract (node new-length)
+  (if (zerop new-length)
+      nil
+      (sv-retract node (node-logical-length-to-true-length new-length))))
+
 (declaim (ftype (function (tail-length node height) (values tail-buf &optional))
                 extract-tail-from-leftmost-leaf))
 (defun extract-tail-from-leftmost-leaf (new-tail-length node height)
   (if (zerop height)
-      (sv-retract node new-tail-length)
-      (extract-tail-from-leftmost-leaf new-tail-length (svref node 0) (1- height))))
+      (node-retract node new-tail-length)
+      (extract-tail-from-leftmost-leaf new-tail-length (node-ref node 0) (1- height))))
 
 (declaim (ftype (function (length tail-length node height) (values (or null node) tail-buf &optional))
                 retract-body-at-same-height))
@@ -974,7 +1010,7 @@ O(log_{+branch-rate+}N) time in the length of the input VEC, and the rest will r
         ((and (zerop height)
               (zerop new-body-length))
          ;; if we want only part of the body, slice it up into a tail
-         (values nil (sv-retract body new-tail-length)))
+         (values nil (node-retract body new-tail-length)))
         ((zerop height)
          ;; this is an invalid case; if we were supposed to deconstruct the buffer into a partial tail, we
          ;; would've hit one of the previous cases.
@@ -994,12 +1030,12 @@ O(log_{+branch-rate+}N) time in the length of the input VEC, and the rest will r
                (if partial-child-p
                    (retract-body-at-same-height partial-child-length
                                                 new-tail-length
-                                                (svref body num-verbatim-children)
+                                                (node-ref body num-verbatim-children)
                                                 child-height)
                    (values nil (extract-tail-from-leftmost-leaf new-tail-length
-                                                                (svref body num-verbatim-children)
+                                                                (node-ref body num-verbatim-children)
                                                                 child-height)))
-             (with-vector-generator (generate-children body)
+             (with-node-generator (generate-children body)
                (values (alloc-node (concat (take generate-children num-verbatim-children)
                                            (if partial-child-p
                                                (generate-these partial-child)
@@ -1021,15 +1057,15 @@ O(log_{+branch-rate+}N) time in the length of the input VEC, and the rest will r
          (let* ((elts-per-child (elts-per-node-at-height new-height))
                 (tail-from-second-child-p (and (plusp new-tail-length) (= new-body-length elts-per-child))))
            (if tail-from-second-child-p
-               (values (svref body 0)
-                       (extract-tail-from-leftmost-leaf new-tail-length (svref body 1) new-height))
+               (values (node-ref body 0)
+                       (extract-tail-from-leftmost-leaf new-tail-length (node-ref body 1) new-height))
 
                ;; if not in that edge case, use `retract-body-at-same-height'
-               (retract-body-at-same-height new-body-length new-tail-length (svref body 0) new-height))))
+               (retract-body-at-same-height new-body-length new-tail-length (node-ref body 0) new-height))))
 
         (:else
          ;; otherwise, there's more than one step between height and new-height; recurse to close the difference.
-         (retract-body-to-lower-height new-height new-body-length new-tail-length (svref body 0) (1- height)))))
+         (retract-body-to-lower-height new-height new-body-length new-tail-length (node-ref body 0) (1- height)))))
 
 (declaim (ftype (function (vec length) (values vec &optional))
                 retract))
@@ -1087,7 +1123,7 @@ i.e. amortized O(1) on small ELTS-TO-REMOVE, and O(log_{+branch_rate+}N) on larg
              ;; remove part of tail
              (copy-vec vec
                        :length new-length
-                       :tail (sv-retract tail new-tail-length)))
+                       :tail (node-retract tail new-tail-length)))
 
 
 
@@ -1120,6 +1156,14 @@ i.e. amortized O(1) on small ELTS-TO-REMOVE, and O(log_{+branch_rate+}N) on larg
 
 ;;; altering elements at a given index with REPLACE-AT and UPDATE-AT
 
+(declaim (ftype (function (node node-index (function (t) (values t &rest t)))
+                          (values node &optional))
+                node-update-at)
+         ;; inline advantageous because it may allow inlining the update-element function
+         (inline node-update-at))
+(defun node-update-at (node index update-element)
+  (sv-update-at node (node-logical-index-to-true-index index) update-element))
+
 (declaim (ftype (function (height node index (function (t) (values t &rest t)))
                           (values node &optional))
                 trie-update-at)
@@ -1130,7 +1174,7 @@ i.e. amortized O(1) on small ELTS-TO-REMOVE, and O(log_{+branch_rate+}N) on larg
   ;; do that.
   (declare (notinline trie-update-at))
   (if (zerop height)
-      (sv-update-at node index update-element)
+      (node-update-at node index update-element)
       (multiple-value-bind (curr remaining) (extract-index-parts-for-height height index)
         (flet ((update-in-child (child)
                  (trie-update-at (1- height)
@@ -1138,7 +1182,7 @@ i.e. amortized O(1) on small ELTS-TO-REMOVE, and O(log_{+branch_rate+}N) on larg
                                  remaining
                                  update-element)))
           (declare (dynamic-extent #'update-in-child))
-          (sv-update-at node curr #'update-in-child)))))
+          (node-update-at node curr #'update-in-child)))))
 
 (declaim (ftype (function (vec index (function (t) (values t &rest t))) (values vec &optional))
                 update-at)
@@ -1165,9 +1209,9 @@ This operation runs in O(log_{+branch-rate+}N) time in the length of VEC."
 
         ((index-in-tail-p vec index)
          (copy-vec vec
-                   :tail (sv-update-at (%vec-tail vec)
-                                        (- index (body-length vec))
-                                        update-element)))
+                   :tail (node-update-at (%vec-tail vec)
+                                         (- index (body-length vec))
+                                         update-element)))
 
         (:else
          (copy-vec vec
@@ -1252,10 +1296,10 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
                      (vector-push body stack)
                      (iter (declare (declare-variables))
                        (repeat height)
-                       (vector-push (svref (stack-peek stack) 0) stack))
+                       (vector-push (node-ref (stack-peek stack) 0) stack))
                      stack))
        ;; the path of indices into those nodes we walk to reach the next element. for
-       ;; all I < Height, (svref (aref NODE-STACK I) (aref INDEX-STACK I)) = (aref
+       ;; all I < Height, (node-ref (aref NODE-STACK I) (aref INDEX-STACK I)) = (aref
        ;; NODE-STACK (1+ I)), i.e. the INDEX-STACK holds the index of the node we are
        ;; currently traversing. for I = HEIGHT, the INDEX-STACK holds the index of the
        ;; next element to yield.
@@ -1271,11 +1315,11 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
     (labels ((generate-from-tail ()
                ;; This is a manually inlined `generate-vector' with an additional check for if
                ;; there is no tail.
-               (if (or (null tail) (>= tail-idx (cl:length (the node ; for some reason, SBCL can't infer this
-                                                                     ; from the previous `null' test.
+               (if (or (null tail) (>= tail-idx (node-length (the node ; for some reason, SBCL can't infer this
+                                                                       ; from the previous `null' test.
                                                                 tail))))
                    (done)
-                   (prog1 (svref tail tail-idx)
+                   (prog1 (node-ref tail tail-idx)
                      (incf tail-idx))))
 
              (generate-from-body ()
@@ -1283,12 +1327,12 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
                ;; CURRENT-IDX always refer to a valid next element.
                (let* ((current-node (stack-peek node-stack))
                       (current-idx (stack-peek index-stack)))
-                 (prog1 (svref current-node current-idx)
+                 (prog1 (node-ref current-node current-idx)
                    (advance-index current-node current-idx))))
 
              (advance-index (current-node current-idx)
                (let* ((next-idx (1+ current-idx)))
-                 (if (= next-idx (cl:length (the node current-node)))
+                 (if (= next-idx (node-length (the node current-node)))
                      ;; If NEXT-IDX is not a valid index into CURRENT-NODE, we need to
                      ;; re-jigger the stack to find a new leaf node.
                      (advance-to-next-node)
@@ -1312,7 +1356,7 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
                      (unless tail-idx
                        ;; But otherwise, push the next node onto the stack, and start
                        ;; traversing it at index 0.
-                       (vector-push (svref (stack-peek node-stack) (stack-peek index-stack))
+                       (vector-push (node-ref (stack-peek node-stack) (stack-peek index-stack))
                                     node-stack)
                        (vector-push 0 index-stack))))))
       (if tail-idx
