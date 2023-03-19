@@ -39,18 +39,25 @@
    #:gen-simple-bit-vector
    #:gen-bit-vector
 
-   #:gen-array
-   ))
+   #:gen-array))
 (in-package :immutable/test/utils)
 
+(defun dribble-dot ()
+  (write-char #\. *test-dribble*))
+
+(defun sync-test-dribble ()
+  (force-output *test-dribble*))
+
 (defun call-quietly (thunk)
-  "Call THUNK in a context where FiveAM produces no text output for checks.
+  "Call THUNK in a context where FiveAM produces no text output for checks. Then print a single dot at the end.
 
 Useful for comparing each element of a VEC against the corresponding element of its source data, to avoid
 printing a large number of dots to *TEST-DRIBBLE*."
-  (let* ((*test-dribble* (make-broadcast-stream)))
-    (unwind-protect (funcall thunk)
-      (close *test-dribble*))))
+  (prog1 (let* ((*test-dribble* (make-broadcast-stream)))
+           (unwind-protect (funcall thunk)
+             (close *test-dribble*)))
+    (dribble-dot)
+    (sync-test-dribble)))
 
 (defmacro quietly (&body body)
   "Evaluate BODY in a context where FiveAM produces no text output for checks.
@@ -58,9 +65,6 @@ printing a large number of dots to *TEST-DRIBBLE*."
 Useful for comparing each element of a VEC against the corresponding element of its source data, to avoid
 printing a large number of dots to *TEST-DRIBBLE*."
   `(call-quietly (lambda () ,@body)))
-
-(defun sync-test-dribble ()
-  (force-output *test-dribble*))
 
 (defun gen-element (&rest generators)
   "Generate a value of essentially arbitrary type, to be compared with EQL."

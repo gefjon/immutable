@@ -19,9 +19,7 @@
       (gc :full t)
       (iter (for thing in-vector things)
         (for hash-before-gc in-vector hashes-before-gc)
-        (is (eql hash-before-gc (hash:hash thing)))))
-    (write-char #\. *test-dribble*)
-    (sync-test-dribble))
+        (is (eql hash-before-gc (hash:hash thing))))))
   (values))
 
 (defparameter *acceptable-hash-conflict-rate*

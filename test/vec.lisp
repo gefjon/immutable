@@ -57,8 +57,6 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
         (is (>= vec::+branch-rate+ (length tail)))
         (is (< 0 (length tail))))
       (is (= length (+ found-body-length (length tail))))))
-  (write-char #\. *test-dribble*)
-  (sync-test-dribble)
   vec)
 
 ;;; testing round-trips between CL data structures and vecs
@@ -336,10 +334,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
               (is (= (1+ (vec:ref vec i))
                      (vec:ref updated i)))
               (is (= (vec:ref vec i)
-                     (vec:ref updated i))))))
-
-      (write-char #\. *test-dribble*)
-      (sync-test-dribble))))
+                     (vec:ref updated i)))))))))
 
 (def-test replace-at-long-integer-vec (:suite immutable-vec-suite)
   (for-all ((vec (gen-vec :elements (gen-integer :min -128 :max 128)
@@ -357,9 +352,7 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
               (is (eq new-element
                      (vec:ref replaced i)))
               (is (= (vec:ref vec i)
-                     (vec:ref replaced i))))))
-      (write-char #\. *test-dribble*)
-      (sync-test-dribble))))
+                     (vec:ref replaced i)))))))))
 
 ;;; testing MAP
 
@@ -367,16 +360,14 @@ IN is an iterate keyword for iterating over SEQUENCE; IN for lists, IN-VECTOR fo
   (for-all ((vec (gen-vec :elements (gen-integer :min -128 :max 128)
                           :length *gen-length-of-height-2-or-3*)))
     (let* ((mapped (vec:map #'1+ vec)))
-      (quietly
-        (is-vec-valid vec)
-        (is-vec-valid mapped)
-        (is (= (vec:length vec)
-               (vec:length mapped)))
+      (is-vec-valid vec)
+      (is-vec-valid mapped)
+      (is (= (vec:length vec)
+             (vec:length mapped)))
+      (quietly 
         (iter (for i below (vec:length vec))
           (is (= (1+ (vec:ref vec i))
-                 (vec:ref mapped i)))))
-      (write-char #\. *test-dribble*)
-      (sync-test-dribble))))
+                 (vec:ref mapped i))))))))
 
 ;;; testing iteration constructs: FOR-EACH, DO, and the ITER driver
 
