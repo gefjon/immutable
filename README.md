@@ -109,15 +109,8 @@ shadow CL symbols liberally to accomplish this.
   - [x] lookup
     - [x] generic over hash and equality functions
     - [ ] tests
-  - [ ] optimize node definitions to store key/value pairs inline. This will likely
-        involve removing `value-node`, redefining `hash-node` and `conflict-node` to have
-        `:type vector` with elements after its slots being key/value pairs or
-        contents-bitmap/subtree pairs, and storing two additional bitmaps in `hash-node`
-        for slot-is-value-p and slot-is-conflict-p. `hash-node` will no longer need to
-        store its own contents bitmap (these will go in the associated key slot of the
-        parent), but it will need to store its two child-type bitmaps. (These bitmaps
-        cannot be combined into a two-bit-map because then it would potentially be 64
-        bits, too large to fit in a fixnum.)
+  - [x] optimize node definitions to store key/value pairs inline.
+    - [ ] convenient internal iterators over the children of a `hash-node` or `conflict-node`?
   - [ ] internal iteration facility
   - [ ] convert from CL collections - `from-hash-table`, `from-alist`?
   - [ ] convert to CL collections - `to-hash-table`, `to-alist`?
@@ -143,6 +136,7 @@ shadow CL symbols liberally to accomplish this.
     - [ ] `do` - macro analogous to `dolist`
     - [ ] `iterate` integration?
   - [ ] equality testing
+  - [ ] change hash and test function of `dict` - `rehash`
   - [ ] hashing?
   - [ ] transients
     - [ ] representation for transient ids

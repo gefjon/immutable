@@ -383,9 +383,11 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
 (defun alloc-trie (height length-in-elts contents)
   (cond ((zerop length-in-elts) nil)
         ((zerop height) (alloc-node contents length-in-elts))
+        ;; TODO: DX-allocate the child-nodes-generator
         (:else (alloc-node (child-nodes-generator (1- height) length-in-elts contents)
                            (trie-length-in-nodes-at-height length-in-elts (1- height))))))
 
+;; TODO: use `define-generator' to offer a DX-allocatable version
 (defun child-nodes-generator (child-height length-in-elts contents)
   (generator ((per-child-length (elts-per-node-at-height child-height))
               (remaining length-in-elts))
@@ -498,16 +500,18 @@ IDX must be inbounds for BODY at HEIGHT, meaning it must have no one bits higher
                                    length-before-in-nodes
                                    last-node-length-in-nodes))
              (with-vector-generator (trie-generator trie)
-               (alloc-node (concat (take trie-generator length-before-in-nodes)
-                                   (generate-these (if (= length-before-in-nodes (cl:length trie))
-                                                       ;; new node is the leftmost in its subtree
-                                                       (wrap-in-spine (1- height) new-node)
-                                                       ;; new node has siblings
-                                                       (grow-trie (svref trie length-before-in-nodes)
-                                                                  new-node
-                                                                  (1- height)
-                                                                  last-node-length-in-nodes))))
-                           new-length-in-nodes)))))))
+               (with-take-generator (before-in-trie-generator trie-generator length-before-in-nodes)
+                 (with-concat-generator (child-generator before-in-trie-generator
+                                                         (generate-these (if (= length-before-in-nodes (cl:length trie))
+                                                                             ;; new node is the leftmost in its subtree
+                                                                             (wrap-in-spine (1- height) new-node)
+                                                                             ;; new node has siblings
+                                                                             (grow-trie (svref trie length-before-in-nodes)
+                                                                                        new-node
+                                                                                        (1- height)
+                                                                                        last-node-length-in-nodes))))
+                   (alloc-node child-generator
+                               new-length-in-nodes)))))))))
 
 (declaim (ftype (function (vec t) (values vec &optional))
                 push-back))
@@ -566,10 +570,11 @@ subsequent children to hold enough elements taken from the FOLLOW-ELTS that the 
 LENGTH-IN-ELTS.
 
 LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of LEADING-DIRECT-CHILD."
-  (alloc-node (concat (generate-these leading-direct-child)
-                      (child-nodes-generator direct-child-height
-                                             (- length-in-elts (elts-per-node-at-height direct-child-height))
-                                             follow-elts))
+  ;; TODO: DX-allocate this tree of generators
+  (alloc-node (generate-concat (generate-these leading-direct-child)
+                               (child-nodes-generator direct-child-height
+                                                      (- length-in-elts (elts-per-node-at-height direct-child-height))
+                                                      follow-elts))
               (trie-length-in-nodes-at-height length-in-elts direct-child-height)))
 
 (declaim (ftype (function (height full-node height generator length) (values node &optional))
@@ -603,15 +608,16 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
       (let* ((node-with-tail-length-in-elts (min (max-body-length-at-height old-height)
                                                  new-body-length))
              (new-nodes-length-in-elts (- new-body-length node-with-tail-length-in-elts)))
-        (alloc-node (concat (generate-these full-body
-                                            (fill-behind-node-to-height old-height
-                                                                        full-tail
-                                                                        0
-                                                                        new-elements
-                                                                        node-with-tail-length-in-elts))
-                            (child-nodes-generator old-height
-                                                   new-nodes-length-in-elts
-                                                   new-elements))
+        ;; TODO: DX-allocate this tree of generators
+        (alloc-node (generate-concat (generate-these full-body
+                                                      (fill-behind-node-to-height old-height
+                                                                                  full-tail
+                                                                                  0
+                                                                                  new-elements
+                                                                                  node-with-tail-length-in-elts))
+                                      (child-nodes-generator old-height
+                                                             new-nodes-length-in-elts
+                                                             new-elements))
                     new-body-length))
 
       (let* ((one-more-height (1+ old-height))
@@ -653,10 +659,11 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
         ;; If all our children are full, this operation is easy: construct a new node which has all of the
         ;; existing children, followed by new nodes taken from the NEW-ELEMENTS.
         (with-vector-generator (existing-children-generator not-full-node)
-          (alloc-node (concat existing-children-generator
-                              (child-nodes-generator child-height
-                                                     (- target-length-in-elts current-length-in-elts)
-                                                     new-elements))
+          ;; TODO: DX-allocate this tree of generators
+          (alloc-node (generate-concat existing-children-generator
+                                        (child-nodes-generator child-height
+                                                               (- target-length-in-elts current-length-in-elts)
+                                                               new-elements))
                       length-in-children))
 
         ;; If we have a partial child, things get a little trickier. The resulting node will have 3 parts, and
@@ -689,15 +696,16 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                            filled-partial-existing-child-length-in-elts
                            new-children-length-in-elts))
           (with-vector-generator (existing-children-generator not-full-node)
-            (alloc-node (concat (take existing-children-generator num-full-leading-children)
-                                (generate-these (extend-node-at-height (svref not-full-node num-full-leading-children)
-                                                                       child-height
-                                                                       partial-existing-child-length-in-elts
-                                                                       new-elements
-                                                                       filled-partial-existing-child-length-in-elts))
-                                (child-nodes-generator child-height
-                                                       new-children-length-in-elts
-                                                       new-elements))
+            ;; TODO: DX-allocate this tree of generators
+            (alloc-node (generate-concat (generate-take existing-children-generator num-full-leading-children)
+                                         (generate-these (extend-node-at-height (svref not-full-node num-full-leading-children)
+                                                                                child-height
+                                                                                partial-existing-child-length-in-elts
+                                                                                new-elements
+                                                                                filled-partial-existing-child-length-in-elts))
+                                         (child-nodes-generator child-height
+                                                                new-children-length-in-elts
+                                                                new-elements))
                         length-in-children))))))
 
 (declaim (ftype (function (height node height length generator length)
@@ -724,6 +732,7 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
          ;; Inlining generator constructors may allow optimizations from treating the generator closure as a
          ;; local.
          (inline generate-tail))
+;; TODO: use `define-generator' to offer a DX-allocatable version
 (defun generate-tail (tail-buf)
   (if tail-buf
       (generate-vector tail-buf)
@@ -761,7 +770,8 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
              (copy-vec vec
                        :length new-length
                        :tail (make-tail new-tail-length
-                                        (concat (generate-tail tail) new-elements))))
+                                        ;; TODO: dx-allocate
+                                        (generate-concat (generate-tail tail) new-elements))))
 
             ((and (not body)
                   (= (tail-length vec) +branch-rate+))
@@ -777,7 +787,8 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                         :height new-height
                         :body (alloc-trie new-height
                                           new-body-length
-                                          (concat (generate-tail tail) new-elements))
+                                          ;; TODO: dx-allocate
+                                          (generate-concat (generate-tail tail) new-elements))
                         :tail (make-tail new-tail-length new-elements)))
 
             ((and (= (body-length vec) (max-body-length-at-height height))
@@ -802,8 +813,9 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                         :body (fill-behind-node-to-height new-height
                                                           body
                                                           height
-                                                          (concat (generate-tail tail)
-                                                                  new-elements)
+                                                          ;; TODO: dx-allocate
+                                                          (generate-concat (generate-tail tail)
+                                                                           new-elements)
                                                           new-body-length)
                         :tail (make-tail new-tail-length new-elements)))
 
@@ -818,8 +830,9 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                         :body (extend-node-at-height body
                                                      height
                                                      (body-length vec)
-                                                     (concat (generate-tail tail)
-                                                             new-elements)
+                                                     ;; TODO: dx-allocate
+                                                     (generate-concat (generate-tail tail)
+                                                                      new-elements)
                                                      new-body-length)
                         :tail (make-tail new-tail-length new-elements)))
 
@@ -831,8 +844,9 @@ LENGTH-IN-ELTS must be a multiple of +BRANCH-RATE+, and includes the length of L
                                                                  body
                                                                  height
                                                                  (body-length vec)
-                                                                 (concat (generate-tail tail)
-                                                                         new-elements)
+                                                                 ;; TODO: dx-allocate
+                                                                 (generate-concat (generate-tail tail)
+                                                                                  new-elements)
                                                                  new-body-length)
                         :tail (make-tail new-tail-length new-elements)))))))
 
@@ -911,9 +925,10 @@ See `extend' for more information."
                (pop-last-node-from-body (svref body num-copied-children)
                                         child-height)
              (with-vector-generator (children-generator body)
-               (values (alloc-node (concat (take children-generator num-copied-children)
-                                           (generate-these (wrap-in-spine (- child-height new-last-child-height)
-                                                                          new-last-child)))
+               ;; TODO: DX-allocate this tree of generators
+               (values (alloc-node (generate-concat (generate-take children-generator num-copied-children)
+                                                    (generate-these (wrap-in-spine (- child-height new-last-child-height)
+                                                                                   new-last-child)))
                                    num-children)
                        new-tail
                        height)))))))
@@ -1000,10 +1015,11 @@ O(log_{+branch-rate+}N) time in the length of the input VEC, and the rest will r
                                                                 (svref body num-verbatim-children)
                                                                 child-height)))
              (with-vector-generator (generate-children body)
-               (values (alloc-node (concat (take generate-children num-verbatim-children)
-                                           (if partial-child-p
-                                               (generate-these partial-child)
-                                               (lambda () (done))))
+               ;; TODO: DX-allocate this tree of generators
+               (values (alloc-node (generate-concat (generate-take generate-children num-verbatim-children)
+                                                    (if partial-child-p
+                                                        (generate-these partial-child)
+                                                        (lambda () (done))))
                                    (+ num-verbatim-children
                                       (if partial-child-p 1 0)))
                        new-tail)))))))
@@ -1345,7 +1361,7 @@ For M > +BRANCH-RATE+, this operation's time complexity is O(M * log_{+branch-ra
   (let* ((added-length (reduce #'+ other-vecs :key #'length)))
     (extend-from-generator vec
                            ;; TODO: figure out how to dx-allocate the generators here
-                           (apply #'concat (mapcar #'generate-vec other-vecs))
+                           (apply #'generate-concat (mapcar #'generate-vec other-vecs))
                            added-length)))
 
 ;; `concatenate' cannot dx-allocate its new-elements generator because it needs to create an unpredictable
