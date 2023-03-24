@@ -4,7 +4,8 @@
   :version "0.0.1"
   :depends-on ("immutable/vec"
                "immutable/hash"
-               "immutable/dict")
+               "immutable/dict"
+               "immutable/dict-old")
   :in-order-to ((test-op (test-op "immutable/test"))))
 
 (defsystem "immutable/test"
@@ -17,3 +18,10 @@
   :test-names ((#:immutable-vec-suite . #:immutable/test/vec)
                (#:immutable-hash-suite . #:immutable/test/hash)
                (#:immutable-dict-suite . #:immutable/test/dict)))
+
+(defsystem "immutable/benchmark"
+  :class :package-inferred-system
+  :depends-on ((:version "uiop" "3.3.5")
+               "immutable/benchmark/dict-old"
+               "immutable/benchmark/dict"
+               "immutable/benchmark/main"))
