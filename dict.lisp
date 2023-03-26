@@ -713,11 +713,11 @@ conflict-hash, the returned node will be `eq' to CONFLICT-NODE."
                       t)
               ;; Otherwise, copy the conflict-node with the offending entry removed.
               (values (conflict-node-remove-at-logical-index conflict-node logical-index)
-                      t))))
-    ;; If not present, return unchanged
-    (return-unchanged)
-    ;; If hashes don't match, the key can't be present, so return unchanged.
-    (return-unchanged)))
+                      t))
+          ;; If not present, return unchanged
+          (return-unchanged))
+        ;; If hashes don't match, the key can't be present, so return unchanged.
+        (return-unchanged))))
 
 (declaim (ftype (function (hash-node array-index hash-node-logical-index)
                           (values hash-node &optional))
