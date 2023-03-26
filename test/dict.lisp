@@ -4,7 +4,8 @@
                 #:set-equal
                 #:shuffle)
   (:local-nicknames (#:dict :immutable/dict)
-                    (#:hash :immutable/hash)))
+                    (#:hash :immutable/hash))
+  (:export #:immutable-dict-suite))
 (in-package :immutable/test/dict)
 
 (def-suite immutable-dict-suite)
@@ -37,73 +38,64 @@
                         hash))
   (values))
 
-(declaim (ftype (function (dict::child-type t t dict::shift fixnum dict::hash-function)
+(declaim (ftype (function ((or null dict::node) dict::shift fixnum dict::hash-function)
                           (values dict::size &optional))
                 is-body-sane-and-size-in-elts))
-(defun is-body-sane-and-size-in-elts (body-type body-key body-value
+(defun is-body-sane-and-size-in-elts (body
                                       shift
                                       hash-path
                                       hash-function)
-  (ecase body-type
-    ((nil) 0)
+  (if (null body)
+      0
+      (ecase (dict::node-type body)
+        (dict::entry-node
+         (is-path-correct hash-path shift (funcall hash-function (dict::entry-node-key body)))
+         1)
 
-    (:entry
-     (is-path-correct hash-path shift (funcall hash-function body-key))
-     1)
+        (dict::conflict-node
+         (let* ((conflict-node body)
+                (conflict-hash (dict::conflict-node-conflict-hash conflict-node)))
+           (is-path-correct hash-path shift conflict-hash)
+           (is (<= 2 (dict::conflict-node-count conflict-node)))
+           (iter (for logical-index below (dict::conflict-node-count conflict-node))
+             (for entry = (dict::conflict-node-ref conflict-node logical-index))
+             (for entry-key = (dict::entry-node-key entry))
+             (for entry-hash = (funcall hash-function entry-key))
+             (is (= conflict-hash
+                    entry-hash)
+                 "Expected each entry in conflict-node to have the same hash as the conflict-hash #x~x, but found entry hash #x~x for entry:~% ~s"
+                 conflict-hash
+                 entry-hash
+                 entry))
+           (dict::conflict-node-count conflict-node)))
 
-    (:conflict-node
-     (let* ((conflict-hash body-key)
-            (conflict-node body-value))
-       (declare (fixnum conflict-hash)
-                (dict::conflict-node conflict-node))
-       (is-path-correct hash-path shift conflict-hash)
-       (is (<= 2 (dict::conflict-node-logical-length conflict-node)))
-       (iter (for logical-index below (dict::conflict-node-logical-length conflict-node))
-         (for (values entry-key entry-value) = (dict::conflict-node-logical-ref conflict-node logical-index))
-         (for entry-hash = (funcall hash-function entry-key))
-         (is (= conflict-hash
-                entry-hash)
-             "Expected each entry in conflict-node to have the same hash as the conflict-hash #x~x, but found entry hash #x~x for entry:~%  (~s ~s)"
-             conflict-hash
-             entry-hash
-             entry-key entry-value))
-       (dict::conflict-node-logical-length conflict-node)))
-
-    (:hash-node
-     (let* ((bitmap body-key)
-            (hash-node body-value)
-            (count (dict::hash-node-logical-count body-value)))
-       (declare (dict::bitmap bitmap)
-                (dict::hash-node hash-node))
-       (is (<= 1 count))
-       (is (= count
-              (logcount bitmap)))
-       (is (zerop (logand (dict::hash-node-child-is-entry-p hash-node)
-                          (dict::hash-node-child-is-conflict-p hash-node))))
-       (is (zerop (logandc2 (dict::hash-node-child-is-entry-p hash-node)
-                            bitmap)))
-       (is (zerop (logandc2 (dict::hash-node-child-is-conflict-p hash-node)
-                            bitmap)))
-       (iter (for logical-index below dict::+branch-rate+)
-         (for child-type = (dict::hash-node-child-type hash-node bitmap logical-index))
-         (unless child-type (next-iteration))
-         (for (values child-key child-value) = (dict::hash-node-logical-ref hash-node bitmap logical-index))
-         (summing (is-body-sane-and-size-in-elts child-type child-key child-value
-                                                 (1+ shift)
-                                                 (add-to-hash-path hash-path logical-index shift)
-                                                 hash-function)))))))
+        (dict::hash-node
+         (let* ((hash-node body)
+                (bitmap (dict::hash-node-child-present-p hash-node))
+                (count (dict::hash-node-count hash-node)))
+           (is (<= 1 count)
+               "Found empty hash node at hash-path #x~x:~% ~s"
+               hash-path hash-node)
+           (is (= count
+                  (logcount bitmap)))
+           (iter (for logical-index below dict::+branch-rate+)
+             (unless (dict::hash-node-contains-p hash-node logical-index)
+               (next-iteration))
+             (for child = (dict::hash-node-logical-ref hash-node logical-index))
+             (summing (is-body-sane-and-size-in-elts child
+                                                     (1+ shift)
+                                                     (add-to-hash-path hash-path logical-index shift)
+                                                     hash-function))))))))
 
 (declaim (ftype (function (dict:dict) (values &optional))
                 is-dict-valid))
 (defun is-dict-valid (dict)
   (quietly
-    (let* ((body-key (dict::%dict-key dict))
-           (body-value (dict::%dict-value dict))
-           (body-type (dict::%dict-child-type dict))
+    (let* ((body (dict::%dict-body dict))
            (size (dict::%dict-size dict))
            (hash-function (dict::%dict-hash-function dict)))
       (is (= size
-             (is-body-sane-and-size-in-elts body-type body-key body-value 0 0 hash-function))))))
+             (is-body-sane-and-size-in-elts body 0 0 hash-function))))))
 
 (defun make-dict-by-reduce (pairs &rest empty-args &key test-function hash-function)
   (declare (ignore test-function hash-function))
@@ -113,84 +105,100 @@
           pairs
           :initial-value (apply #'dict:empty empty-args)))
 
-(defun are-entries-equal (a-key a-value b-key b-value
-                        test-function hash-function &optional (same-value test-function))
-  (is (= (funcall hash-function a-key)
-         (funcall hash-function b-key)))
+(defun are-entries-equal (a b
+                          test-function hash-function &optional (same-value test-function)
+                          &aux (a-key (dict::entry-node-key a))
+                            (a-value (dict::entry-node-value a))
+                            (a-hash (funcall hash-function a-key))
+                            (b-key (dict::entry-node-key b))
+                            (b-value (dict::entry-node-value b))
+                            (b-hash (funcall hash-function b-key)))
+  (is (= a-hash b-hash)
+      "Entries have different hashes under hash-function ~s:~% ~s => #x~x~% ~s => #x~x"
+      a a-hash
+      b b-hash)
   (is (funcall test-function
                a-key
-               b-key))
+               b-key)
+      "Entries have keys which are not ~s:~% ~s~% ~s"
+      test-function
+      a b)
   (when same-value
     (is (funcall same-value
                  a-value
-                 b-value))))
+                 b-value)
+        "Entries have values which are not ~s:~% ~s~% ~s"
+        same-value
+        a b)))
 
-(defun conflict-node-entry-pairs (conflict-node)
-  (iter (for logical-index below (dict::conflict-node-logical-length conflict-node))
-    (for (values key value) = (dict::conflict-node-logical-ref conflict-node logical-index))
-    (collect (list key value))))
+(defun conflict-node-entries (conflict-node)
+  (iter (for logical-index below (dict::conflict-node-count conflict-node))
+    (collect (dict::conflict-node-ref conflict-node logical-index))))
 
-(defun pair-sets-equal-p (pair-set-a pair-set-b keys-equal hash-function &optional (values-equal keys-equal))
-  (set-equal pair-set-a pair-set-b
-             :test (lambda (pair-a pair-b)
-                     (destructuring-bind (a-key a-value) pair-a
-                       (destructuring-bind (b-key b-value) pair-b
-                         (and (= (funcall hash-function a-key)
-                                 (funcall hash-function b-key))
-                              (funcall keys-equal a-key b-key)
-                              (if values-equal
-                                  (funcall values-equal a-value b-value)
-                                  t)))))))
+(defun entry-sets-equal-p (a b test-function hash-function &optional (same-value test-function))
+  (set-equal a b
+             :test (lambda (a-entry b-entry
+                            &aux (a-key (dict::entry-node-key a-entry))
+                            (a-value (dict::entry-node-value a-entry))
+                            (a-hash (funcall hash-function a-key))
+                            (b-key (dict::entry-node-key b-entry))
+                            (b-value (dict::entry-node-value b-entry))
+                            (b-hash (funcall hash-function b-key)))
+                     (and (= a-hash b-hash)
+                          (funcall test-function a-key b-key)
+                          (if same-value
+                              (funcall same-value a-value b-value)
+                              t)))))
 
-(defun are-conflict-nodes-equal (a-hash a-conflict-node
-                                 b-hash b-conflict-node
-                                 test-function hash-function &optional (same-value test-function))
-  (is (= a-hash b-hash))
-  (is (= (dict::conflict-node-logical-length a-conflict-node)
-         (dict::conflict-node-logical-length b-conflict-node)))
-  (is (pair-sets-equal-p (conflict-node-entry-pairs a-conflict-node)
-                         (conflict-node-entry-pairs b-conflict-node)
-                         test-function hash-function same-value)))
+(defun are-conflict-nodes-equal (a b
+                                 test-function hash-function &optional (same-value test-function)
+                                 &aux (a-hash (dict::conflict-node-conflict-hash a))
+                                   (b-hash (dict::conflict-node-conflict-hash b)))
+  (is (= a-hash b-hash)
+      "Conflict nodes have different hashes:~% #x~x from ~s~% #x~x from ~s"
+      a-hash a
+      b-hash b)
+  (is (= (dict::conflict-node-count a)
+         (dict::conflict-node-count b))
+      "Conflict nodes have different lengths:~% ~d from ~s~% ~d from ~s"
+      (dict::conflict-node-count a) a
+      (dict::conflict-node-count b) b)
+  (is (entry-sets-equal-p (conflict-node-entries a)
+                          (conflict-node-entries b)
+                          test-function hash-function same-value)
+      "Conflict nodes' entries are not setwise equal"))
 
-(defun are-hash-nodes-equal (a-bitmap a-hash-node
-                             b-bitmap b-hash-node
-                             test-function hash-function &optional (same-value test-function))
+(defun are-hash-nodes-equal (a b
+                             test-function hash-function &optional (same-value test-function)
+                             &aux (a-bitmap (dict::hash-node-child-present-p a))
+                               (b-bitmap (dict::hash-node-child-present-p b)))
   (is (= a-bitmap b-bitmap))
-  (is (= (dict::hash-node-child-is-entry-p a-hash-node)
-         (dict::hash-node-child-is-entry-p b-hash-node)))
-  (is (= (dict::hash-node-child-is-conflict-p a-hash-node)
-         (dict::hash-node-child-is-conflict-p b-hash-node)))
   (iter (for logical-index below dict::+branch-rate+)
-    ;; We know this is the entry type for both nodes, because we've already asserted their various bitmaps are
-    ;; equal.
-    (for entry-type = (dict::hash-node-child-type a-hash-node a-bitmap logical-index))
-    (unless entry-type (next-iteration))
-    (for (values a-key a-value) = (dict::hash-node-logical-ref a-hash-node a-bitmap logical-index))
-    (for (values b-key b-value) = (dict::hash-node-logical-ref b-hash-node b-bitmap logical-index))
-    (are-bodies-same entry-type a-key a-value
-                     entry-type b-key b-value
+    ;; We know this contains-p applies to both nodes, because we asserted their bitmaps were equal.
+    (unless (dict::hash-node-contains-p a logical-index)
+      (next-iteration))
+    (for a-child = (dict::hash-node-logical-ref a logical-index))
+    (for b-child = (dict::hash-node-logical-ref b logical-index))
+    (are-bodies-same a-child b-child
                      test-function hash-function same-value)))
 
-(defun are-bodies-same (a-type a-key a-value
-                        b-type b-key b-value
-                        test-function hash-function &optional (same-value test-function))
-  (unless (eq a-type b-type)
-    (fail "Type of bodies do not match: ~a and ~a"
-          a-type b-type))
+(defun are-bodies-same (a b
+                        test-function hash-function &optional (same-value test-function)
+                        &aux (a-type (dict::node-type a))
+                          (b-type (dict::node-type b)))
+  (is (eq a-type b-type)
+      "Node types do not match:~% ~s for ~s~% ~s for ~s"
+      a-type a
+      b-type b)
   (ecase a-type
-    ((nil) nil)
+    (dict::entry-node (are-entries-equal a b
+                                         test-function hash-function same-value))
 
-    (:entry (are-entries-equal a-key a-value
-                               b-key b-value
-                               test-function hash-function same-value))
+    (dict::conflict-node (are-conflict-nodes-equal a b
+                                                   test-function hash-function same-value))
 
-    (:conflict-node (are-conflict-nodes-equal a-key a-value
-                                              b-key b-value
-                                              test-function hash-function same-value))
-
-    (:hash-node (are-hash-nodes-equal a-key a-value
-                                      b-key b-value
-                                      test-function hash-function same-value)))
+    (dict::hash-node (are-hash-nodes-equal a b
+                                           test-function hash-function same-value)))
   (values))
 
 (defun are-structures-same (a b &optional (same-value (dict::%dict-test-function a)))
@@ -201,8 +209,8 @@
             (dict::%dict-test-function b)))
     (is (= (dict::%dict-size a)
            (dict::%dict-size b)))
-    (are-bodies-same (dict::%dict-child-type a) (dict::%dict-key a) (dict::%dict-value a)
-                     (dict::%dict-child-type b) (dict::%dict-key b) (dict::%dict-value b)
+    (are-bodies-same (dict::%dict-body a)
+                     (dict::%dict-body b)
                      (dict::%dict-test-function a) (dict::%dict-hash-function a)
                      same-value)))
 
