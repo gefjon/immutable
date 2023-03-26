@@ -9,7 +9,7 @@
 ;;;   into later nodes, where Bagwell does the opposite. This simplifies our traversal, and has the convenient
 ;;;   side effect that we don't need to check if we've run out of bits in the hash; after that point, LDB will
 ;;;   always return all-zeros or all-ones, depending on sign.
-(uiop:define-package :immutable/dict-old
+(uiop:define-package :immutable/dict-naive
   (:import-from :alexandria
                 #:array-index #:array-length #:define-constant #:when-let #:once-only #:with-gensyms #:if-let)
   (:shadow #:get #:remove)
@@ -37,12 +37,12 @@
 
    ;; MAKE-HASH-TABLE analogue to construct an empty dict
    #:empty))
-(in-package :immutable/dict-old)
+(in-package :immutable/dict-naive)
 
 #+immutable-dict-debug
 (declaim (optimize (speed 1) (safety 3) (space 1) (debug 3) (compilation-speed 0)))
 #-immutable-dict-debug
-(declaim (optimize (speed 3) (safety 1) (space 1) (debug 1) (compilation-speed 0)))
+(declaim (optimize (speed 3) (safety 0) (space 1) (debug 1) (compilation-speed 0)))
 
 ;;; Early type definitions and whatnot
 

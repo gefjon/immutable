@@ -14,7 +14,8 @@
    #:sv-remove-at
    #:sv-2-other-index
 
-   #:define-vector-struct))
+   #:define-vector-struct
+   #:vector-struct-name))
 (in-package #:immutable/%simple-vector-utils)
 
 (declaim (ftype (function (simple-vector t) (values simple-vector &optional))
@@ -108,6 +109,13 @@
   (svref simple-vector
          (if (zerop index) 1 0)))
 
+(declaim (ftype (function (simple-vector) (values symbol &optional))
+                vector-struct-name)
+         (inline vector-struct-name))
+(defun vector-struct-name (vector-struct)
+  "Return the NAME of VECTOR-STRUCT, which must be an instance of a `define-vector-struct' defined with `:name t'."
+  (svref vector-struct 0))
+
 (defmacro define-vector-struct (name
                                 (&key max-length
                                    (ref nil ref-supplied-p)
@@ -115,7 +123,8 @@
                                    (conc-name (format nil "~a-" name))
                                    ((:length length-name) nil length-supplied-p)
                                    (logical-index-to-true-index nil)
-                                   (logical-length-to-true-length nil))
+                                   (logical-length-to-true-length nil)
+                                   named)
                                 &body slot-descriptors)
   "Define a structured vector type with named slots followed by indexed elements.
 
@@ -123,6 +132,10 @@ Each of the SLOT-DESCRIPTORS may be either:
 - A symbol SLOT-NAME.
 - A list of the form (SLOT-NAME &key TYPE INITFORM).
 If unsupplied, slots' types default to T, and their initforms to nil.
+
+If NAMED is true, a slot will be added before the SLOT-DESCRIPTORS which always holds the symbol NAME. It can
+be accessed using `vector-struct-name'. The behavior of applying `vector-struct-name' to any object except a
+vector-struct with `:named' supplied is undefined.
 
 A accessor for each of the SLOT-DESCRIPTORS will be defined, named by concatenating CONC-NAME with the
 SLOT-NAME, as per `defstruct'. `:read-only' slots are not supported; if you don't want to mutate the slots,
@@ -158,7 +171,8 @@ The constructor, length-function, ref-function, logical-index-to-true-index-func
 all be declared globally `inline'."
   (flet ((make-name (&rest stuff)
            (apply #'symbolicate conc-name stuff)))
-    (let* ((num-slots (length slot-descriptors))
+    (let* ((num-slots (+ (length slot-descriptors)
+                         (if named 1 0)))
            (logical-length-type (make-name "LENGTH"))
            (logical-index-type (make-name "INDEX"))
            (max-logical-length (or max-length
@@ -207,6 +221,10 @@ all be declared globally `inline'."
                  (slot-accessor-name (slot-descriptor)
                    (make-name (slot-name slot-descriptor)))
 
+                 (slot-position (slot-descriptor)
+                   (+ (position slot-descriptor slot-descriptors :test #'eq)
+                      (if named 1 0)))
+
                  (define-accessor (slot-descriptor &aux (accessor-name (slot-accessor-name slot-descriptor)))
                    `(progn
                       (declaim (ftype (function (,name) (values ,(slot-type slot-descriptor) &optional))
@@ -222,9 +240,6 @@ all be declared globally `inline'."
                       (defun (setf ,accessor-name) (new-value instance)
                         (setf (svref instance ,(slot-position slot-descriptor))
                               new-value))))
-
-                 (slot-position (slot-descriptor)
-                   (position slot-descriptor slot-descriptors :test #'eq))
 
                  (slot-kwarg-type (slot-descriptor)
                    `(,(slot-initarg slot-descriptor)
@@ -291,6 +306,8 @@ all be declared globally `inline'."
                                         initial-contents)
                      (let* ((true-length (,logical-length-to-true-length length))
                             (instance (make-array true-length)))
+                       ,@(when named
+                           `((setf (svref instance 0) ',name)))
                        ,@(mapcar #'initialize-slot-form slot-descriptors)
                        (cond ((and initial-element-p initial-contents)
                               (error ,(format nil ":INITIAL-ELEMENT and :INITIAL-CONTENTS are mutually exclusive in ~a" ctor-name)))

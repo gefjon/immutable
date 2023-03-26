@@ -1,16 +1,16 @@
-(uiop:define-package :immutable/benchmark/dict
+(uiop:define-package :immutable/benchmark/dict-naive
   (:use :cl :iterate :immutable/benchmark/utils)
   (:import-from :alexandria
                 #:symbolicate)
   (:local-nicknames (#:hash :immutable/hash)
-                    (#:dict :immutable/dict))
-  (:export #:immutable-dict-suite))
-(in-package :immutable/benchmark/dict)
+                    (#:dict :immutable/dict-naive))
+  (:export #:immutable-dict-naive-suite))
+(in-package :immutable/benchmark/dict-naive)
 
 (declaim (optimize (speed 3) (safety 1) (debug 1) (space 1) (compilation-speed 0)))
 
-(def-suite immutable-dict-suite
-    (asdf:system-relative-pathname "immutable" "benchmark-data/dict/"))
+(def-suite immutable-dict-naive-suite
+    (asdf:system-relative-pathname "immutable" "benchmark-data/dict-naive/"))
 
 (declaim (ftype (function (fixnum symbol &optional boolean) (values dict:dict &optional))
                 make-integer-to-string-dict)
@@ -44,7 +44,7 @@
   (cons 'progn
         (iter (for test-function in '(hash:== equal))
           (collect
-              `(define-growing-experiment ,(symbolicate base-name '- test-function) (:suite immutable-dict-suite)
+              `(define-growing-experiment ,(symbolicate base-name '- test-function) (:suite immutable-dict-naive-suite)
                    (,total-size-binding)
                  (symbol-macrolet ((,test-function-binding ',test-function))
                    ,@body))))))

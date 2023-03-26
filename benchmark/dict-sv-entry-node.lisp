@@ -1,16 +1,16 @@
-(uiop:define-package :immutable/benchmark/dict-old
+(uiop:define-package :immutable/benchmark/dict-sv-entry-node
   (:use :cl :iterate :immutable/benchmark/utils)
   (:import-from :alexandria
                 #:symbolicate)
   (:local-nicknames (#:hash :immutable/hash)
-                    (#:dict :immutable/dict-old))
-  (:export #:immutable-dict-old-suite))
-(in-package :immutable/benchmark/dict-old)
+                    (#:dict :immutable/dict-sv-entry-node))
+  (:export #:immutable-dict-sv-entry-node-suite))
+(in-package :immutable/benchmark/dict-sv-entry-node)
 
 (declaim (optimize (speed 3) (safety 1) (debug 1) (space 1) (compilation-speed 0)))
 
-(def-suite immutable-dict-old-suite
-    (asdf:system-relative-pathname "immutable" "benchmark-data/dict-old/"))
+(def-suite immutable-dict-sv-entry-node-suite
+    (asdf:system-relative-pathname "immutable" "benchmark-data/dict-sv-entry-node/"))
 
 (declaim (ftype (function (fixnum symbol &optional boolean) (values dict:dict &optional))
                 make-integer-to-string-dict)
@@ -44,7 +44,7 @@
   (cons 'progn
         (iter (for test-function in '(hash:== equal))
           (collect
-              `(define-growing-experiment ,(symbolicate base-name '- test-function) (:suite immutable-dict-old-suite)
+              `(define-growing-experiment ,(symbolicate base-name '- test-function) (:suite immutable-dict-sv-entry-node-suite)
                    (,total-size-binding)
                  (symbol-macrolet ((,test-function-binding ',test-function))
                    ,@body))))))
