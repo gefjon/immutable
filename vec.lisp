@@ -205,7 +205,7 @@ arguments `:element-type', `:adjustable' and `:fill-pointer' analogous to `make-
    (%index :type unsigned-byte
            :initarg :index
            :reader out-of-bounds-index)
-   (%operation :type (member 'ref 'replace-at 'update-at)
+   (%operation :type (member ref replace-at update-at)
                :initarg :operation
                :reader out-of-bounds-operation))
   (:report (lambda (c s)
