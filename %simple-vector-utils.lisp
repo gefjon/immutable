@@ -13,6 +13,7 @@
    #:sv-insert-at
    #:sv-remove-at
    #:sv-2-other-index
+   #:sv-copy-subrange
 
    #:define-vector-struct
    #:vector-struct-name))
@@ -115,6 +116,26 @@
 (defun vector-struct-name (vector-struct)
   "Return the NAME of VECTOR-STRUCT, which must be an instance of a `define-vector-struct' defined with `:name t'."
   (svref vector-struct 0))
+
+(declaim (ftype (function (simple-vector simple-vector
+                                         &key (:count (or null array-length))
+                                         (:target-start array-index) (:source-start array-index))
+                          (values &optional))
+                sv-copy-subrange)
+         ;; inlining may allow the compiler to specialize on whether key args are or aren't passed.
+         (inline sv-copy-subrange))
+(defun sv-copy-subrange (target source &key
+                                         (target-start 0) (source-start 0)
+                                         count
+                         &aux (really-count (min (or count most-positive-fixnum)
+                                                 (- (length target) target-start)
+                                                 (- (length source) source-start))))
+  (declare (array-length really-count))
+  (iter (declare (declare-variables))
+    (for (the fixnum i) below really-count)
+    (setf (svref target (+ i target-start))
+          (svref source (+ i source-start))))
+  (values))
 
 (defmacro define-vector-struct (name
                                 (&key max-length
