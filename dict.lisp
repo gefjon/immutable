@@ -480,17 +480,19 @@ Precondition: (/= LEFT-HASH RIGHT-HASH), or else we would construct a unified `c
                 conflict-node-replace-at-logical-index))
 (defun conflict-node-replace-at-logical-index (conflict-node logical-index new-entry)
   (let* ((true-index (conflict-node-logical-index-to-true-index logical-index))
-         (elements
-           ;; TODO: DX-allocate this tree of generators
-           (generate-concat (generate-vector conflict-node
-                                             :start (conflict-node-logical-index-to-true-index 0)
-                                             :end true-index)
-                            (generate-these new-entry)
-                            (generate-vector conflict-node
-                                             :start (1+ true-index)))))
-    (%make-conflict-node :conflict-hash (conflict-node-conflict-hash conflict-node)
-                         :length (conflict-node-count conflict-node)
-                         :initial-contents elements)))
+         (zero (conflict-node-logical-index-to-true-index 0))
+         (new-node (%make-conflict-node :conflict-hash (conflict-node-conflict-hash conflict-node)
+                                        :length (conflict-node-count conflict-node))))
+    (sv-copy-subrange new-node conflict-node
+                      :count (- true-index zero)
+                      :target-start zero
+                      :source-start zero)
+    (setf (svref new-node true-index)
+          new-entry)
+    (sv-copy-subrange new-node conflict-node
+                      :target-start (1+ true-index)
+                      :source-start (1+ true-index))
+    new-node))
 
 (declaim (ftype (function (conflict-node entry-node)
                           (values conflict-node &optional))
@@ -500,14 +502,15 @@ Precondition: (/= LEFT-HASH RIGHT-HASH), or else we would construct a unified `c
 
 Precondition: the key of NEW-ENTRY has the same hash as CONFLICT-NODE, and no existing entry in CONFLICT-NODE
               has the same key as NEW-ENTRY."
-  (let* ((elements
-           ;; TODO: dx-allocate this tree of generators
-           (generate-concat (generate-vector conflict-node
-                                             :start (conflict-node-logical-index-to-true-index 0))
-                            (generate-these new-entry))))
-    (%make-conflict-node :conflict-hash (conflict-node-conflict-hash conflict-node)
-                         :length (1+ (conflict-node-count conflict-node))
-                         :initial-contents elements)))
+  (let* ((new-node (%make-conflict-node :conflict-hash (conflict-node-conflict-hash conflict-node)
+                                        :length (1+ (conflict-node-count conflict-node))))
+         (zero (conflict-node-logical-index-to-true-index 0)))
+    (sv-copy-subrange new-node conflict-node
+                      :target-start zero
+                      :source-start zero)
+    (setf (svref new-node (conflict-node-logical-index-to-true-index (conflict-node-count conflict-node)))
+          new-entry)
+    new-node))
 
 (declaim (ftype (function (conflict-node entry-node fixnum shift test-function)
                           (values node bit &optional))
@@ -547,17 +550,17 @@ contain both the existing CONFLICT-NODE and the new entry."
                                            counted-index
                                            new-child)
   (let* ((new-child-true-index (hash-node-counted-index-to-true-index counted-index))
-         (elements
-           ;; TODO: DX-allocate this tree of generators
-           (generate-concat (generate-vector hash-node
-                                             :start (hash-node-counted-index-to-true-index 0)
-                                             :end new-child-true-index)
-                            (generate-these new-child)
-                            (generate-vector hash-node
-                                             :start (1+ new-child-true-index)))))
-    (%make-hash-node :child-present-p (hash-node-child-present-p hash-node)
-                     :length (hash-node-count hash-node)
-                     :initial-contents elements)))
+         (new-node (%make-hash-node :child-present-p (hash-node-child-present-p hash-node)
+                                    :length (hash-node-count hash-node)))
+         (zero (hash-node-counted-index-to-true-index 0)))
+    (sv-copy-subrange new-node hash-node :count (- new-child-true-index 0)
+                                         :target-start zero
+                                         :source-start zero)
+    (setf (svref new-node new-child-true-index)
+          new-child)
+    (sv-copy-subrange new-node hash-node :target-start (1+ new-child-true-index)
+                                         :source-start (1+ new-child-true-index))
+    new-node))
 
 (declaim (ftype (function (hash-node
                            hash-node-logical-index
@@ -573,17 +576,16 @@ contain both the existing CONFLICT-NODE and the new entry."
          (new-count (1+ (hash-node-count hash-node)))
          (new-elt-counted-index (bitmap-logical-index-to-counted-index new-bitmap logical-index))
          (new-elt-true-index (hash-node-counted-index-to-true-index new-elt-counted-index))
-         (elements
-           ;; TODO: DX-allocate this tree of generators
-           (generate-concat (generate-vector hash-node
-                                             :start (hash-node-counted-index-to-true-index 0)
-                                             :end new-elt-true-index)
-                            (generate-these new-child)
-                            (generate-vector hash-node
-                                             :start new-elt-true-index))))
-    (%make-hash-node :child-present-p new-bitmap
-                     :length new-count
-                     :initial-contents elements)))
+         (zero (hash-node-counted-index-to-true-index 0))
+         (new-node (%make-hash-node :child-present-p new-bitmap
+                                    :length new-count)))
+    (sv-copy-subrange new-node hash-node :count (- new-elt-true-index zero)
+                                         :target-start zero
+                                         :source-start zero)
+    (setf (svref new-node new-elt-true-index) new-child)
+    (sv-copy-subrange new-node hash-node :target-start (1+ new-elt-true-index)
+                                         :source-start new-elt-true-index)
+    new-node))
 
 ;; predeclaration for type inference on recursive calls by `insert-into-hash-node'
 (declaim (ftype (function (node entry-node fixnum shift test-function hash-function)
@@ -674,18 +676,20 @@ mapping is replaced."
 (declaim (ftype (function (conflict-node array-index)
                           (values conflict-node &optional))
                 conflict-node-remove-at-logical-index))
-(defun conflict-node-remove-at-logical-index (conflict-node logical-index
-                                              &aux (true-index (conflict-node-logical-index-to-true-index logical-index)))
-  (let* ((elements
-           ;; TODO: dx-allocate this tree of generators
-           (generate-concat (generate-vector conflict-node
-                                             :start (conflict-node-logical-index-to-true-index 0)
-                                             :end true-index)
-                            (generate-vector conflict-node
-                                             :start (1+ true-index)))))
-    (%make-conflict-node :conflict-hash (conflict-node-conflict-hash conflict-node)
-                         :length (1- (conflict-node-count conflict-node))
-                         :initial-contents elements)))
+(defun conflict-node-remove-at-logical-index (conflict-node logical-index)
+  (let* ((new-node (%make-conflict-node :conflict-hash (conflict-node-conflict-hash conflict-node)
+                                        :length (1- (conflict-node-count conflict-node))))
+         (zero (conflict-node-logical-index-to-true-index 0))
+         (true-index (conflict-node-logical-index-to-true-index logical-index)))
+    (sv-copy-subrange new-node conflict-node
+                      :count (- true-index zero)
+                      :target-start zero
+                      :source-start zero)
+    (sv-copy-subrange new-node conflict-node
+                      :target-start true-index
+                      :source-start (1+ true-index))
+
+    new-node))
 
 (declaim (ftype (function (conflict-node t fixnum test-function)
                           (values node boolean &optional))
@@ -731,17 +735,15 @@ Precondition: HASH-NODE must `hash-node-contains-p' LOGICAL-INDEX-TO-REMOVE, and
          (new-bitmap (unset-bit old-bitmap
                                 logical-index-to-remove))
          (removed-true-index (hash-node-counted-index-to-true-index counted-index-to-remove))
-         (removed-elements
-           ;; TODO: dx-allocate this tree of generators
-           (generate-concat (generate-vector hash-node
-                                             :start (hash-node-counted-index-to-true-index 0)
-                                             :end removed-true-index)
-                            (generate-vector hash-node
-                                             :start (1+ removed-true-index)))))
-
-    (%make-hash-node :child-present-p new-bitmap
-                     :length (1- (hash-node-count hash-node))
-                     :initial-contents removed-elements)))
+         (new-node (%make-hash-node :child-present-p new-bitmap
+                                    :length (1- (hash-node-count hash-node))))
+         (zero (hash-node-counted-index-to-true-index 0)))
+    (sv-copy-subrange new-node hash-node :count (- removed-true-index zero)
+                                         :target-start zero
+                                         :source-start zero)
+    (sv-copy-subrange new-node hash-node :target-start removed-true-index
+                                         :source-start (1+ removed-true-index))
+    new-node))
 
 (declaim (ftype (function (bitmap hash-node-logical-index)
                           (values hash-node-logical-index &optional))
