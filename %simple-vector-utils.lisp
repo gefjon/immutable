@@ -180,7 +180,8 @@ Clauses are:
                                    (conc-name (format nil "~a-" name))
                                    ((:length length-name) nil length-supplied-p)
                                    (logical-index-to-true-index nil)
-                                   (logical-length-to-true-length nil))
+                                   (logical-length-to-true-length nil)
+                                   (zero-index nil))
                                 &body slot-descriptors)
   "Define a structured vector type with named slots followed by indexed elements.
 
@@ -382,4 +383,7 @@ all be declared globally `inline'."
                                    (setf ,ref-name))
                             (inline (setf ,ref-name)))
                    (defun (setf ,ref-name) (new-value instance idx)
-                     (setf (svref instance (,logical-index-to-true-index idx)) new-value))))))))))
+                     (setf (svref instance (,logical-index-to-true-index idx)) new-value))))
+
+             ,@(when zero-index
+                 `((defconstant ,zero-index ,num-slots)))))))))

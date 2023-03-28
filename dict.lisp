@@ -116,7 +116,8 @@ When extracting a `hash-node-logical-index' from a `hash', we use the +NODE-INDE
      :ref hash-node-paired-ref
      :logical-index-to-true-index hash-node-paired-index-to-true-index
      :logical-length-to-true-length hash-node-paired-length-to-true-length
-     :constructor %make-hash-node)
+     :constructor %make-hash-node
+     :zero-index +hash-node-zero+)
   ;; The CHILD-IS-ENTRY-P and CHILD-IS-CONFLICT-P bitmaps map counted-indices to whether the associated child
   ;; is a key/value pair or a hash/conflict-node pair. These are mutually exclusive. If both bits are 0, the
   ;; associated child is either not present, or is a logical-index-bitmap/hash-node pair.
@@ -152,7 +153,8 @@ When extracting a `hash-node-logical-index' from a `hash', we use the +NODE-INDE
      :ref conflict-node-paired-ref
      :logical-index-to-true-index conflict-node-paired-index-to-true-index
      :logical-length-to-true-length conflict-node-paired-length-to-true-length
-     :constructor %make-conflict-node))
+     :constructor %make-conflict-node
+     :zero-index +conflict-node-zero+))
 
 (declaim (ftype (function (conflict-node) (values array-length &optional))
                 conflict-node-logical-length)
@@ -209,12 +211,6 @@ When extracting a `hash-node-logical-index' from a `hash', we use the +NODE-INDE
 
 (defun conflict-node-value-true-index (logical-index)
   (conflict-node-paired-index-to-true-index (1+ (* logical-index 2))))
-
-(defconstant +conflict-node-zero+ (conflict-node-key-true-index 0)
-  "The true index corresponding with paired index 0 for conflict-nodes.
-
-Useful for copying ranges when doing functional updates to conflict nodes, so `sv-copy-subrange' can skip over
-the header.")
 
 (declaim (ftype (function (conflict-node array-index) (values t &optional))
                 conflict-node-true-ref)
@@ -323,12 +319,6 @@ Precondition: the HASH-NODE must `hash-node-contains-p' the INDEX."
 (defun hash-node-value-true-index (bitmap logical-index)
   (hash-node-paired-index-to-true-index (1+ (* (bitmap-logical-index-to-counted-index bitmap logical-index)
                                                2))))
-
-(defconstant +hash-node-zero+ (hash-node-paired-index-to-true-index 0)
-  "The true index corresponding with paired index zero for hash-nodes.
-
-Useful for copying ranges when doing functional updates to hash nodes, so `sv-copy-subrange' can skip over the
-header.")
 
 (declaim (ftype (function (hash-node array-index) (values t &optional))
                 hash-node-true-ref)
