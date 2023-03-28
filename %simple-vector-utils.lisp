@@ -3,7 +3,8 @@
   (:import-from :alexandria
                 #:array-length #:array-index
                 #:with-gensyms
-                #:symbolicate)
+                #:symbolicate
+                #:once-only)
   (:export
    #:sv-push-back
    #:sv-pop-back
@@ -13,6 +14,8 @@
    #:sv-insert-at
    #:sv-remove-at
    #:sv-2-other-index
+   #:sv-copy-subrange
+   #:sv-initialize
 
    #:define-vector-struct))
 (in-package #:immutable/%simple-vector-utils)
@@ -107,6 +110,68 @@
 (defun sv-2-other-index (simple-vector index)
   (svref simple-vector
          (if (zerop index) 1 0)))
+
+(declaim (ftype (function (simple-vector simple-vector
+                                         &key (:count (or null array-length))
+                                         (:target-start array-index) (:source-start array-index))
+                          (values array-length &optional))
+                sv-copy-subrange)
+         ;; inlining may allow the compiler to specialize on whether key args are or aren't passed.
+         (inline sv-copy-subrange))
+(defun sv-copy-subrange (target source &key
+                                         (target-start 0) (source-start 0)
+                                         count
+                         &aux (really-count (min (or count most-positive-fixnum)
+                                                 (- (length target) target-start)
+                                                 (- (length source) source-start))))
+  "Copy at most COUNT elements from SOURCE starting at SOURCE-START into TARGET starting at TARGET-START.
+
+Returns the number of elements copied."
+  (declare (array-length really-count))
+  (iter (declare (declare-variables))
+    (for (the fixnum i) below really-count)
+    (setf (svref target (+ i target-start))
+          (svref source (+ i source-start))))
+  really-count)
+
+(defmacro sv-initialize (target (&key (start-from 0)) &body clauses)
+  "Write sequential values into TARGET starting from the index START-FROM based on the CLAUSES.
+
+TARGET is evaluated, as is START-FROM if supplied. TARGET must evaluate to a `simple-vector', and START-FROM to
+an array-index that is inbounds for TARGET.
+
+Returns the TARGET.
+
+Clauses are:
+
+- (:subrange SOURCE &key COUNT START): copy at most COUNT elements from SOURCE, which must evaluate to a
+  `simple-vector'. Elements are read from SOURCE starting from the index START, up to either (+ START COUNT)
+  or (length SOURCE). Stops early if the resulting write would overflow TARGET, but subsequent clauses are not
+  skipped. The consequences are undefined if SOURCE is `eq' to TARGET.
+
+- EXPR, where EXPR is any Common Lisp expression: evaluate the EXPR to produce an element and insert it. No
+  bounds-checking is performed, so clauses of this form may attempt to write past the end of TARGET."
+  (once-only (target)
+    (with-gensyms (fill-index)
+      (labels ((push-elt (elt)
+                 `(progn (setf (svref ,target ,fill-index)
+                               ,elt)
+                         (incf ,fill-index)))
+               (transform-compound-clause (operator args)
+                 (ecase operator
+                   (:subrange (destructuring-bind (source &key (count nil countp) (start nil startp)) args
+                                `(incf ,fill-index (sv-copy-subrange ,target ,source
+                                                                     :target-start ,fill-index
+                                                                     ,@(when countp `(:count ,count))
+                                                                     ,@(when startp `(:source-start ,start))))))))
+               (transform-clause (clause)
+                 (if (and (consp clause) (keywordp (first clause)))
+                     (transform-compound-clause (first clause) (rest clause))
+                     (push-elt clause))))
+        `(let* ((,fill-index ,start-from))
+           (declare (array-length ,fill-index))
+           ,@(mapcar #'transform-clause clauses)
+           ,target)))))
 
 (defmacro define-vector-struct (name
                                 (&key max-length
