@@ -17,3 +17,5 @@
   :test-names ((#:immutable-vec-suite . #:immutable/test/vec)
                (#:immutable-hash-suite . #:immutable/test/hash)
                (#:immutable-dict-suite . #:immutable/test/dict)))
+
+(register-system-packages "atomics" '(:org.shirakumo.atomics))

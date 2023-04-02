@@ -9,7 +9,7 @@
    #:gen-element
 
    #:*gen-short-length*
-   
+
    #:*gen-fixnum*
    #:*gen-bignum*
    #:*gen-short-float*
@@ -39,7 +39,9 @@
    #:gen-simple-bit-vector
    #:gen-bit-vector
 
-   #:gen-array))
+   #:gen-array
+
+   #:signals-with))
 (in-package :immutable/test/utils)
 
 (defun dribble-dot ()
@@ -223,3 +225,22 @@ printing a large number of dots to *TEST-DRIBBLE*."
         (setf (row-major-aref this i)
               (funcall elements)))
       this)))
+
+(defmacro signals-with ((condition-class &rest readers-and-expected-values) &body body)
+  (flet ((assert-slot-matches (reader-and-expected-value)
+           (destructuring-bind (test expected-value reader) reader-and-expected-value
+             `(is (,test ,expected-value (,reader c))))))
+    `(handler-case (progn ,@body)
+       (,condition-class (c)
+         ,@(mapcar #'assert-slot-matches readers-and-expected-values))
+       (condition (c)
+         (fail "SIGNALS-WITH: Expected a condition of class ~s, but found ~s.
+
+Executing ~s was expected to signal an error of class ~s, but instead it signaled ~s."
+               ',condition-class c '(progn ,@body) c))
+       (:no-error (&rest c)
+         (fail "SIGNALS-WITH: Expected a condition of class ~s.
+
+Executing ~s was expected to signal an error of class ~s, but instead it returned normally. Return values were: ~s"
+
+               ',condition-class '(progn ,@body) c)))))
