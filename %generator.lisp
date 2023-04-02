@@ -4,7 +4,8 @@
                 #:define-constant
                 #:array-index
                 #:array-length
-                #:with-gensyms)
+                #:with-gensyms
+                #:parse-ordinary-lambda-list)
   (:export #:generator
            #:done
            #:advance
@@ -17,8 +18,10 @@
            #:do-generator
            #:collect-to-list
            #:collect-to-vector
-           #:concat
-           #:take))
+           #:generate-concat
+           #:with-concat-generator
+           #:generate-take
+           #:with-take-generator))
 (in-package #:immutable/%generator)
 
 ;;; early defs
@@ -61,12 +64,118 @@ VARS are treated as in `let*'."
 (eval-when (:compile-toplevel :load-toplevel)
   (defun typed-arg-type (typed-arg)
     (etypecase typed-arg
+      ((member &optional &rest &key) typed-arg)
       (symbol t)
       (cons (second typed-arg))))
   (defun typed-arg-name (typed-arg)
     (etypecase typed-arg
       (symbol typed-arg)
-      (cons (first typed-arg)))))
+      (cons (first typed-arg))))
+  (defun typed-key-arg-declaration (typed-key-arg)
+    (destructuring-bind (name type keyword initform) typed-key-arg
+      (declare (ignore name initform))
+      `(,keyword ,type)))
+
+  (defun typed-key-arg-binding (typed-key-arg)
+    (destructuring-bind (name type keyword initform) typed-key-arg
+      (declare (ignore type))
+      `((,keyword ,name) ,initform)))
+
+  (defun keywordify (&rest stuff)
+    (intern (apply #'concatenate 'string (mapcar #'string stuff)) "KEYWORD"))
+
+  ;; Adapted from `alexandria:parse-ordinary-lambda-list'
+  (defun parse-typed-arg-list (typed-arg-list)
+    "Parse the TYPED-ARG-LIST into (values REQUIRED-ARGS OPTIONAL-ARGS REST-ARG KEY-ARGS KEYP ALLOW-OTHER-KEYS-P).
+
+The REQUIRED-ARGS will be a list whose elements are normalized into the form (NAME TYPE).
+
+The OPTIONAL-ARGS will be a list whose elements are normalized into the form (NAME TYPE).
+
+The REST-ARG will be either nil or a single element normalized into the form (NAME ELEMENT-TYPE), where
+ELEMENT-TYPE is the type of each element of the rest list.
+
+The KEY-ARGS will be a list whose elements are normalized into the form (NAME TYPE KEYWORD INITFORM).
+
+KEYP and ALLOW-OTHER-KEYS-P will be booleans denoting the presence of `&key' and `&allow-other-keys' in the
+arglist respectively."
+    (let* ((state :required)
+           (required '())
+           (optional '())
+           (rest nil)
+           (keys '())
+           (keyp nil)
+           (allow-other-keys-p nil))
+      (flet ((fail (elt)
+               (error "Misplaced ~s in typed-arg-list while in ~s part:~%  ~s"
+                      elt state typed-arg-list))
+             (in-state-p (&rest states)
+               (member state states :test #'eq)))
+        (dolist (elt typed-arg-list)
+          (case elt
+            (&optional
+             (if (in-state-p :required)
+                 (setf state :optional)
+                 (fail elt)))
+            (&rest
+             (if (in-state-p :required :optional)
+                 (setf state :rest)
+                 (fail elt)))
+            (&key
+             (if (in-state-p :required :optional :after-rest)
+                 (setf state :key
+                       keyp t)
+                 (fail elt)))
+            (&allow-other-keys
+             (if (in-state-p :key)
+                 (setf allow-other-keys-p t
+                       state :allow-other-keys)
+                 (fail elt)))
+            (&aux (error "typed-arg-lists do not permit &AUX.~%  In typed-arg-list:~%  ~s"
+                         typed-arg-list))
+            (otherwise
+             (ecase state
+               (:required (push (list (typed-arg-name elt) (typed-arg-type elt))
+                                required))
+               (:optional (push (list (typed-arg-name elt) (typed-arg-type elt))
+                                required))
+               (:rest (setf rest (list (typed-arg-name elt) (typed-arg-type elt))
+                            state :after-rest))
+               (:key (push (etypecase elt
+                             (symbol (list elt t (keywordify elt) nil))
+                             (cons (destructuring-bind (name-stuff type) elt
+                                     (if (symbolp name-stuff)
+                                         (list name-stuff type (keywordify name-stuff) nil)
+                                         (destructuring-bind (name-stuff initform) name-stuff
+                                           (if (symbolp name-stuff)
+                                               (list name-stuff type (keywordify name-stuff) initform)
+                                               (destructuring-bind (keyword name) name-stuff
+                                                 (list name type keyword initform))))))))
+                           keys)))))))
+      (values (reverse required)
+              (reverse optional)
+              rest
+              (reverse keys)
+              keyp
+              allow-other-keys-p)))
+
+  (defun typed-arglist-to-function-type-arg-list (typed-arg-list)
+    (multiple-value-bind (required optional rest key keyp allow-other-keys-p)
+        (parse-typed-arg-list typed-arg-list)
+      `(,@(mapcar #'typed-arg-type required)
+        ,@(when optional `(&optional ,@(mapcar #'typed-arg-type optional)))
+        ,@(when rest `(&rest ,(typed-arg-type rest)))
+        ,@(when keyp `(&key ,@(mapcar #'typed-key-arg-declaration key)))
+        ,@(when allow-other-keys-p `(&allow-other-keys)))))
+
+  (defun typed-arglist-to-lambda-list (typed-arg-list)
+    (multiple-value-bind (required optional rest key keyp allow-other-keys-p)
+        (parse-typed-arg-list typed-arg-list)
+      `(,@(mapcar #'typed-arg-name required)
+        ,@(when optional `(&optional ,@(mapcar #'typed-arg-name optional)))
+        ,@(when rest `(&rest ,(typed-arg-name rest)))
+        ,@(when keyp `(&key ,@(mapcar #'typed-key-arg-binding key)))
+        ,@(when allow-other-keys-p `(&allow-other-keys))))))
 
 (defmacro define-indefinite-extent-generator (make-generator (&rest typed-args) docstring (&rest bindings) &body generator-body)
   "Define a function named MAKE-GENERATOR which produces a generator.
@@ -82,11 +191,12 @@ VARS are treated as in `let*'."
 - GENERATOR-BODY should be expressions which will be evaluated on each invocation of the resulting
   generator. They should either return the next value to be yielded by the generator, or call `done' to signal
   the end of the generator."
+
   `(progn
-     (declaim (ftype (function (,@(mapcar #'typed-arg-type typed-args)) (values generator &optional))
+     (declaim (ftype (function (,@(typed-arglist-to-function-type-arg-list typed-args)) (values generator &optional))
                      ,make-generator)
               (inline ,make-generator))
-     (defun ,make-generator (,@(mapcar #'typed-arg-name typed-args))
+     (defun ,make-generator (,@(typed-arglist-to-lambda-list typed-args))
        ,docstring
        (let* (,@bindings)
          (lambda () ,@generator-body)))))
@@ -122,25 +232,25 @@ Where
   generator."
   (with-gensyms (generator-binding with-generator-body with-generator-body-function)
     `(progn
-       (declaim (ftype (function (,@(mapcar #'typed-arg-type typed-args)
-                                  (function (generator) (values &rest t)))
+       (declaim (ftype (function ((function (generator) (values &rest t))
+                                  ,@(typed-arglist-to-function-type-arg-list typed-args))
                                  (values &rest t))
                        ,call-with-generator)
                 (inline ,call-with-generator))
-       (defun ,call-with-generator (,@(mapcar #'typed-arg-name typed-args) thunk)
+       (defun ,call-with-generator (thunk ,@(typed-arglist-to-lambda-list typed-args))
          (let* (,@bindings)
            (flet ((generator ()
                     ,@generator-body))
              (declare (dynamic-extent #'generator))
              (funcall thunk #'generator))))
 
-       (defmacro ,with-generator ((,generator-binding ,@(mapcar #'typed-arg-name typed-args)) &body ,with-generator-body)
+       (defmacro ,with-generator ((,generator-binding &rest args) &body ,with-generator-body)
          ,docstring
          (list 'flet (list (list* ',with-generator-body-function (list ,generator-binding) ,with-generator-body))
                (list 'declare (list 'dynamic-extent (list 'function ',with-generator-body-function)))
-               (list ',call-with-generator
-                     ,@(mapcar #'typed-arg-name typed-args)
-                     (list 'function ',with-generator-body-function)))))))
+               (list* ',call-with-generator
+                      (list 'function ',with-generator-body-function)
+                      args))))))
 
 (defmacro define-generator (name (&rest typed-args) docstring (&rest bindings) &body generator-body)
   "Define a function NAME-generator and a macro with-NAME-generator for indefinite-extent and dynamic-extent generators, respectively.
@@ -183,7 +293,9 @@ Where
   "Generate the ELTS in order left-to-right."
   (generate-list elts))
 
-(define-generator vector ((vector vector))
+(define-generator vector ((vector vector)
+                          &key ((start 0) array-index)
+                          ((end (length vector)) array-index))
                   "Generate elements of VECTOR left-to-right.
 
 If VECTOR has a fill pointer, only generate elements before the fill pointer.
@@ -198,10 +310,11 @@ The consequences are undefined if VECTOR is destructively modified during genera
 
 Making any of these actions may cause a generator which had previously signaled `done' to produce
 new elements, or do other weird stuff."
-    ((i 0))
+    ((i start)
+     (limit (min end (length vector))))
   (declare (type array-index i))
-  (if (< i (length vector)) (prog1 (aref vector i)
-                              (incf i))
+  (if (< i limit) (prog1 (aref vector i)
+                    (incf i))
       (done)))
 
 ;;; iterating over generators
@@ -258,27 +371,24 @@ element; lambda lists will be applied to all the values of each element."
 
 ;;; combining gnerators
 
-(declaim (ftype (function (&rest generator) (values generator &optional))
-                concat))
-(defun concat (&rest generators &aux (stack generators))
-  "A generator which yields all of the elements of the GENERATORS, in order from right to left."
-  (labels ((concat-generator ()
+(define-generator concat (&rest (generators generator))
+                  "A generator which yields all of the elements of the GENERATORS, in order from left to right."
+    ((stack generators))
+  (labels ((get-next ()
              (if (null stack)
                  (done)
                  (handler-case (advance (first stack))
                    (done ()
                      (pop stack)
-                     (concat-generator))))))
-    #'concat-generator))
+                     (get-next))))))
+    (get-next)))
 
-(declaim (ftype (function (generator (and unsigned-byte fixnum)) (values generator &optional))
-                take))
-(defun take (generator count)
-  "A generator which yields at most COUNT elements of GENERATOR."
-  (generator ((remaining count))
-    (declare (type (and unsigned-byte fixnum) remaining))
-    (if (not (plusp remaining))
-        (done)
-        (progn
-          (decf remaining)
-          (advance generator)))))
+(define-generator take ((generator generator) (count (and unsigned-byte fixnum)))
+                  "A generator which yields at most COUNT elements of GENERATOR."
+    ((remaining count))
+  (declare ((and unsigned-byte fixnum) remaining))
+  (if (not (plusp remaining))
+      (done)
+      (progn
+        (decf remaining)
+        (advance generator))))
