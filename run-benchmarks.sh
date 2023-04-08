@@ -4,4 +4,4 @@ sbcl --dynamic-space-size 4096 \
      --disable-debugger \
      --eval '(ql:quickload "immutable/benchmark/compare-batch-inserts")' \
      --eval '(immutable/benchmark/compare-batch-inserts:run-benchmarks)' \
-     --eval '(sb:exit :code 0)'
+     --eval '(sb-ext:exit :code 0)'
