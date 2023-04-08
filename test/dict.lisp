@@ -2,7 +2,8 @@
   (:use :cl :fiveam :iterate :immutable/test/utils)
   (:import-from :alexandria
                 #:set-equal
-                #:shuffle)
+                #:shuffle
+                #:with-gensyms)
   (:local-nicknames (#:dict :immutable/dict)
                     (#:hash :immutable/hash))
   (:export #:immutable-dict-suite))
@@ -313,3 +314,35 @@
                         (finally (return partial)))))
         (is-dict-valid removed)
         (is (= 0 (dict:size removed)))))))
+
+(def-test detect-stale-transient (:suite immutable-dict-suite)
+  (let* ((transient (dict:transient (dict:empty)))
+         (persistent (dict:persistent! transient)))
+    ;; operations that are disallowed on stale transients
+    (signals-with (dict:stale-transient (eq transient dict:stale-transient-transient)
+                                        (eq 'dict:insert! dict:stale-transient-operation))
+      (dict:insert! transient 0 0))
+    (signals-with (dict:stale-transient (eq transient dict:stale-transient-transient)
+                                        (eq 'dict:remove! dict:stale-transient-operation))
+      (dict:remove! transient 0))
+    ;; operations that are allowed on stale transients
+    (is (null (dict:get transient 0)))
+    (is (zerop (dict:size transient)))))
+
+(def-test transient-not-observable (:suite immutable-dict-suite)
+  (let* ((dict (iter (with partial = (dict:empty))
+                 (for i below 128)
+                 (setf partial (dict:insert partial i i))
+                 (finally (return partial))))
+         (transient (iter (with partial = (dict:transient dict))
+                      (for i below 128)
+                      (setf partial (dict:insert! partial i (1+ i)))
+                      (finally (return partial))))
+         (persistent (dict:persistent! transient)))
+    (is-dict-valid dict)
+    (is-dict-valid persistent)
+    (iter (for i below 128)
+      (quietly
+        (is (eql i (dict:get dict i)))
+        (is (eql (1+ i) (dict:get persistent i)))
+        (is (eql (1+ i) (dict:get transient i)))))))

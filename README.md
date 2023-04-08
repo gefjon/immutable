@@ -108,7 +108,7 @@ shadow CL symbols liberally to accomplish this.
     - [x] generic over hash and equality functions
   - [x] lookup
     - [x] generic over hash and equality functions
-    - [ ] tests
+    - [x] tests
   - [x] optimize node definitions to store key/value pairs inline.
     - [ ] convenient internal iterators over the children of a `hash-node` or `conflict-node`?
   - [ ] internal iteration facility
@@ -116,11 +116,14 @@ shadow CL symbols liberally to accomplish this.
   - [ ] convert to CL collections - `to-hash-table`, `to-alist`?
   - [ ] convenient constructor macro?
   - [x] insert one pair
-    - [ ] tests
+    - [x] tests
   - [x] remove one pair
-    - [ ] tests
+    - [x] tests
   - [ ] user-friendly print-object
   - [ ] test that same hash and test functions imply same structure after various operations
+    - [x] insertion in random order
+    - [ ] removal
+    - [ ] replacement
   - [ ] insert multiple pairs?
   - [ ] remove multiple pairs?
   - [ ] combine two (or more?) maps - `union`
@@ -138,12 +141,12 @@ shadow CL symbols liberally to accomplish this.
   - [ ] equality testing
   - [ ] change hash and test function of `dict` - `rehash`
   - [ ] hashing?
-  - [ ] transients
-    - [ ] representation for transient ids
-    - [ ] make dict transient - `transient!`
-    - [ ] add one pair
+  - [x] transients
+    - [x] representation for transient ids
+    - [x] make dict transient - `transient!`
+    - [x] add one pair
     - [ ] add multiple pairs?
-    - [ ] remove one pair
+    - [x] remove one pair
     - [ ] remove multiple pairs?
   - [ ] integration with trivial-extensible-sequences?
 - [ ] `rope` - ropes of characters as strings

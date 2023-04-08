@@ -12,6 +12,9 @@
 (uiop:define-package :immutable/dict
   (:import-from :alexandria
                 #:array-index #:array-length #:define-constant #:when-let #:once-only #:with-gensyms #:if-let)
+  (:import-from #:immutable/%atomic
+                #:define-atomic-counter
+                #:increment-atomic-counter)
   (:shadow #:get #:remove)
   (:use :cl :iterate :immutable/%generator :immutable/%simple-vector-utils)
   (:import-from :immutable/hash
@@ -20,20 +23,29 @@
                 #:unsigned-fixnum)
   (:export
 
-   ;; type definition
+   ;; type definitions
    #:dict
+   #:transient
 
-   ;; number of elements
-   #:size
+   ;; converting between dicts and transients
+   #:transient #:persistent!
+
+   ;; stale transient error
+   #:stale-transient
+   #:stale-transient-operation
+   #:stale-transient-transient
+
+   ;; reading properties of dicts and transients
+   #:size #:test-function #:hash-function
 
    ;; GETHASH analogue
    #:get
 
-   ;; (SETF GETHASH) analogue, but persistent
-   #:insert
+   ;; (SETF GETHASH) analogue
+   #:insert #:insert!
 
-   ;; REMHASH analogue, but persistent
-   #:remove
+   ;; REMHASH analogue
+   #:remove #:remove!
 
    ;; MAKE-HASH-TABLE analogue to construct an empty dict
    #:empty))
@@ -83,6 +95,23 @@ When extracting a `hash-node-logical-index' from a `hash', we use the +NODE-INDE
   "An index into a `hash-node'."
   `(integer 0 ,+branch-rate+))
 
+(deftype transient-id ()
+  '(or null fixnum))
+
+(define-atomic-counter current-transient-id 0
+                       "Atomic counter used as a global resource for transient ids.
+
+Nodes and `transient's hold a (nullable) fixnum transient-id. Transient operations are allowed to mutate a
+node if and only if the node's id is non-null and matches the enclosing transient's id.
+
+When creating a transient, this counter will be incremented with `increment-atomic-counter', and the new value
+will be used as the new transient's id.")
+
+(declaim (ftype (function () (values fixnum &optional))
+                get-transient-id))
+(defun get-transient-id ()
+  (increment-atomic-counter current-transient-id))
+
 ;;; struct definitions for node variants
 
 ;;; HASH-NODE
@@ -118,6 +147,8 @@ When extracting a `hash-node-logical-index' from a `hash', we use the +NODE-INDE
      :logical-length-to-true-length hash-node-paired-length-to-true-length
      :constructor %make-hash-node
      :zero-index +hash-node-zero+)
+  (transient-id :type transient-id
+                :initform nil)
   ;; The CHILD-IS-ENTRY-P and CHILD-IS-CONFLICT-P bitmaps map counted-indices to whether the associated child
   ;; is a key/value pair or a hash/conflict-node pair. These are mutually exclusive. If both bits are 0, the
   ;; associated child is either not present, or is a logical-index-bitmap/hash-node pair.
@@ -154,7 +185,9 @@ When extracting a `hash-node-logical-index' from a `hash', we use the +NODE-INDE
      :logical-index-to-true-index conflict-node-paired-index-to-true-index
      :logical-length-to-true-length conflict-node-paired-length-to-true-length
      :constructor %make-conflict-node
-     :zero-index +conflict-node-zero+))
+     :zero-index +conflict-node-zero+)
+  (transient-id :type transient-id
+                :initform nil))
 
 (declaim (ftype (function (conflict-node) (values array-length &optional))
                 conflict-node-logical-length)
@@ -189,14 +222,157 @@ When extracting a `hash-node-logical-index' from a `hash', we use the +NODE-INDE
   (key (error "Supply :KEY to %MAKE-DICT"))
   (value (error "Supply :VALUE to %MAKE-DICT")))
 
+(declaim (inline %make-transient %transient-id %transient-size %transient-hash-function %transient-test-function %transient-key %transient-value %transient-child-type))
+
+(eval-when (:compile-toplevel :load-toplevel)
+  (defparameter +transient-explanation+
+    "`transient's are mutable `dict's. Certain operations, namely `insert' and `remove', have transient analogues
+`insert!' and `remove!' which may in some cases reduce consing by mutating otherwise inaccessible subparts. No
+mutations to a `transient' will ever be visible to the `dict' from which it was constructed.
+
+Construct a `transient' from a `dict' using the function `transient'.
+
+Convert a `transient' into a `dict' using the function `persistent!'. A `transient' which has been made
+`persistent!' is considered \"stale,\" and all future transient operations on it will fail, singaling an error
+of class `stale-transient'.
+
+The behavior of concurrently mutating a `transient' from multiple threads is undefined."))
+
+(defstruct (transient
+            (:constructor %make-transient)
+            (:copier nil)
+            (:conc-name %transient-))
+  #.(concatenate 'string
+     "A temporarily mutable `dict', tracking a unique id to ensure it only mutates otherwise-inaccessible nodes.
+
+"
+
+     +transient-explanation+)
+  (id (error "Supply :ID to %MAKE-TRANSIENT")
+   :type transient-id)
+  (size (error "Supply :SIZE to %MAKE-TRANSIENT")
+   :type size)
+  (hash-function (error "Supply :HASH-FUNCTION to %MAKE-TRANSIENT")
+   :type hash-function)
+  (test-function (error "Supply :TEST-FUNCTION to %MAKE-TRANSIENT")
+   :type test-function)
+  (child-type (error "Supply :CHILD-TYPE to %MAKE-TRANSIENT")
+   :type child-type)
+  (key (error "Supply :KEY to %MAKE-TRANSIENT"))
+  (value (error "Supply :VALUE to %MAKE-TRANSIENT")))
+
+;;; error for using a stale transient, i.e. one which has already been made `persistent!'
+
+(define-condition stale-transient (error)
+  ((%transient :type transient
+               :initarg :transient
+               :accessor stale-transient-transient)
+   (%operation :type symbol
+               :initarg :operation
+               :accessor stale-transient-operation))
+  (:report (lambda (c s)
+             (format s "Attempt to ~s on a `transient' which has already been made `persistent!': ~s"
+                     (stale-transient-operation c)
+                     (stale-transient-transient c)))))
+
+;;; converting between transient and persistent dicts
+
+(declaim (ftype (function (dict) (values transient &optional))
+                transient))
+(defun transient (dict)
+  #.(concatenate 'string
+                 "Construct a `transient' with the contents of DICT.
+
+This operation runs in constant time, and does not copy any substructure of DICT. Future transient operations
+will begin by copying what substructure they need to, and will only mutate newly-constructed nodes which are
+uniquely owned by the transient.
+
+"
+            +transient-explanation+)
+  (%make-transient :id (get-transient-id)
+                   :size (%dict-size dict)
+                   :hash-function (%dict-hash-function dict)
+                   :test-function (%dict-test-function dict)
+                   :child-type (%dict-child-type dict)
+                   :key (%dict-key dict)
+                   :value (%dict-value dict)))
+
+(declaim (ftype (function (transient) (values dict &optional))
+                persistent!))
+(defun persistent! (transient)
+  #.(concatenate 'string "Convert TRANSIENT into a persistent `dict'.
+
+This operation runs in constant time.
+
+After this operation, TRANSIENT is considered \"stale,\" and all future transient operations on it will fail
+with an error of class `stale-transient'.
+
+"
+                 +transient-explanation+)
+  (if (null (%transient-id transient))
+      (error 'stale-transient
+             :operation 'persistent!
+             :transient transient)
+      (progn
+        (setf (%transient-id transient) nil)
+        (%make-dict :size (%transient-size transient)
+                    :hash-function (%transient-hash-function transient)
+                    :test-function (%transient-test-function transient)
+                    :child-type (%transient-child-type transient)
+                    :key (%transient-key transient)
+                    :value (%transient-value transient)))))
+
 ;;; accessors
 
-(declaim (ftype (function (dict) (values size &optional))
+(declaim (ftype (function ((or dict transient)) (values size &optional))
                 size)
-         ;; Trivial enough that call overhead is meaningful, so always inline.
+         ;; Inlining may allow the compiler to eliminate `etypecase' dispatch.
          (inline size))
 (defun size (dict)
-  (%dict-size dict))
+  (etypecase dict
+    (dict (%dict-size dict))
+    (transient (%transient-size dict))))
+
+(declaim (ftype (function ((or dict transient)) (values hash-function &optional))
+                hash-function)
+         ;; Inlining may allow the compiler to eliminate `etypecase' dispatch.
+         (inline hash-function))
+(defun hash-function (dict)
+  (etypecase dict
+    (dict (%dict-hash-function dict))
+    (transient (%transient-hash-function dict))))
+
+(declaim (ftype (function ((or dict transient)) (values test-function &optional))
+                test-function)
+         ;; Inlining may allow the compiler to eliminate `etypecase' dispatch.
+         (inline test-function))
+(defun test-function (dict)
+  (etypecase dict
+    (dict (%dict-test-function dict))
+    (transient (%transient-test-function dict))))
+
+(declaim (ftype (function ((or dict transient)) (values t &optional))
+                %key %value)
+         ;; Inlining may allow the compiler to eliminate `etypecase' dispatch.
+         (inline %key %value))
+(defun %key (dict)
+  (etypecase dict
+    (dict (%dict-key dict))
+    (transient (%transient-key dict))))
+
+(defun %value (dict)
+  (etypecase dict
+    (dict (%dict-value dict))
+    (transient (%transient-value dict))))
+
+(declaim (ftype (function ((or dict transient)) (values child-type &optional))
+                %child-type)
+         ;; Inlining may allow the compiler to eliminate `etypecase' dispatch.
+         (inline %child-type))
+(defun %child-type (dict)
+  (etypecase dict
+    (dict (%dict-child-type dict))
+    (transient (%transient-child-type dict))))
 
 ;;; lookup with GET
 
@@ -352,6 +528,22 @@ Precondition: the HASH-NODE must `hash-node-contains-p' the INDEX."
     (values (hash-node-true-ref hash-node key-index)
             (hash-node-true-ref hash-node (1+ key-index)))))
 
+(declaim (ftype (function (bitmap hash-node hash-node-logical-index t t) (values &optional))
+                set-hash-node-logical-entry)
+         ;; Trivial enough that call overhead is meaningful, so always inline.
+         (inline set-hash-node-logical-entry))
+(defun set-hash-node-logical-entry (bitmap hash-node logical-index new-key new-value)
+  "Write the pair (NEW-KEY => NEW-VALUE) into HASH-NODE at LOGICAL-INDEX.
+
+It is the caller's responsibility to update HASH-NODE's child-is-entry-p and child-is-conflict-p bitmaps to
+suit the new entry."
+  (let* ((key-index (hash-node-key-true-index bitmap logical-index)))
+    (setf (hash-node-true-ref hash-node key-index)
+          new-key)
+    (setf (hash-node-true-ref hash-node (1+ key-index))
+          new-value))
+  (values))
+
 (declaim (ftype (function (shift fixnum) (values hash-node-logical-index))
                 extract-hash-part-for-shift)
          ;; Trivial enough that call overhead is meaningful, so always inline.
@@ -429,7 +621,7 @@ NOT-FOUND is an arbitrary value to be returned as primary value if NODE does not
                                         not-found)
                       (values not-found nil))))))
 
-(declaim (ftype (function (dict t &optional t) (values t boolean))
+(declaim (ftype (function ((or dict transient) t &optional t) (values t boolean))
                 get))
 (defun get (dict key &optional not-found)
   "Get the value associated with KEY in DICT, or NOT-FOUND if the KEY is not present.
@@ -437,11 +629,11 @@ NOT-FOUND is an arbitrary value to be returned as primary value if NODE does not
 Like `gethash', returns (values VALUE PRESENTP). If DICT contains a mapping for KEY, returns the associated
 value as VALUE, and T as PRESENTP. If DICT does not contain a mapping for KEY, returns (values NOT-FOUND
 nil)."
-  (with-accessors ((hash-function %dict-hash-function)
-                   (test-function %dict-test-function)
-                   (child-type %dict-child-type)
-                   (body-key %dict-key)
-                   (body-value %dict-value))
+  (with-accessors ((hash-function hash-function)
+                   (test-function test-function)
+                   (child-type %child-type)
+                   (body-key %key)
+                   (body-value %value))
       dict
     (child-lookup child-type
                   body-key
@@ -500,12 +692,14 @@ nil)."
 (defun logical-count-to-paired-length (logical-count)
   (* logical-count 2))
 
-(declaim (ftype (function (t t child-type hash-node-logical-index
+(declaim (ftype (function (transient-id
+                           t t child-type hash-node-logical-index
                            t t child-type hash-node-logical-index
                            bit)
                           (values bitmap hash-node (eql :hash-node) bit &optional))
                 make-two-entry-hash-node))
-(defun make-two-entry-hash-node (left-key left-value left-child-type left-idx
+(defun make-two-entry-hash-node (transient-id
+                                 left-key left-value left-child-type left-idx
                                  right-key right-value right-child-type right-idx
                                  num-added)
   (let* ((child-is-conflict-p 0)
@@ -528,7 +722,8 @@ nil)."
                                          (vector right-key right-value left-key left-value))))
               (declare (dynamic-extent initial-contents))
               (with-vector-generator (gen-initial-contents initial-contents)
-                (%make-hash-node :child-is-entry-p child-is-entry-p
+                (%make-hash-node :transient-id transient-id
+                                 :child-is-entry-p child-is-entry-p
                                  :child-is-conflict-p child-is-conflict-p
                                  :length (logical-count-to-paired-length 2)
                                  :initial-contents gen-initial-contents)))
@@ -536,17 +731,18 @@ nil)."
             :hash-node
             num-added)))
 
-(declaim (ftype (function (t t child-type hash-node-logical-index t)
+(declaim (ftype (function (transient-id t t child-type hash-node-logical-index t)
                           (values bitmap hash-node (eql :hash-node) t &optional))
                 make-one-entry-hash-node))
-(defun make-one-entry-hash-node (key value child-type logical-index additional-return-value
+(defun make-one-entry-hash-node (transient-id key value child-type logical-index additional-return-value
                                  &aux (bitmap (bitmap-from-indices logical-index)))
   (values bitmap
 
           (let* ((initial-contents (vector key value)))
             (declare (dynamic-extent initial-contents))
             (with-vector-generator (gen-initial-contents initial-contents)
-              (%make-hash-node :child-is-entry-p (if (eq child-type :entry)
+              (%make-hash-node :transient-id transient-id
+                               :child-is-entry-p (if (eq child-type :entry)
                                                      bitmap
                                                      0)
                                :child-is-conflict-p (if (eq child-type :conflict-node)
@@ -559,29 +755,32 @@ nil)."
 
           additional-return-value))
 
-(declaim (ftype (function (fixnum array-length bit &rest t)
+(declaim (ftype (function (transient-id fixnum array-length bit &rest t)
                           (values fixnum conflict-node (eql :conflict-node) bit &optional))
                 make-conflict-node))
-(defun make-conflict-node (hash logical-count num-added &rest keys-and-values)
+(defun make-conflict-node (transient-id hash logical-count num-added &rest keys-and-values)
   (declare (dynamic-extent keys-and-values))
   (values
    hash
 
    (with-list-generator (gen-initial-contents keys-and-values)
-     (%make-conflict-node :length (logical-count-to-paired-length logical-count)
+     (%make-conflict-node :transient-id transient-id
+                          :length (logical-count-to-paired-length logical-count)
                           :initial-contents gen-initial-contents))
 
    :conflict-node
 
    num-added))
 
-(declaim (ftype (function (t t fixnum child-type
+(declaim (ftype (function (transient-id
+                           t t fixnum child-type
                            t t fixnum child-type
                            shift
                            bit)
                           (values bitmap hash-node (eql :hash-node) bit &optional))
                 promote-node))
-(defun promote-node (left-key left-value left-hash left-child-type
+(defun promote-node (transient-id
+                     left-key left-value left-hash left-child-type
                      right-key right-value right-hash right-child-type
                      shift
                      num-added)
@@ -597,30 +796,34 @@ Precondition: (/= LEFT-HASH RIGHT-HASH), or else we would construct a unified `c
          (right-index (extract-hash-part-for-shift shift right-hash)))
     (if (= left-index right-index)
         (multiple-value-bind (sub-bitmap sub-node hash-node num-added)
-            (promote-node left-key left-value left-hash left-child-type
+            (promote-node transient-id
+                          left-key left-value left-hash left-child-type
                           right-key right-value right-hash right-child-type
                           (1+ shift)
                           num-added)
-          (make-one-entry-hash-node sub-bitmap sub-node hash-node
+          (make-one-entry-hash-node transient-id
+                                    sub-bitmap sub-node hash-node
                                     left-index
                                     num-added))
-        (make-two-entry-hash-node left-key left-value left-child-type left-index
+        (make-two-entry-hash-node transient-id
+                                  left-key left-value left-child-type left-index
                                   right-key right-value right-child-type right-index
                                   num-added))))
 
-(declaim (ftype (function (t t t t fixnum shift test-function hash-function)
+(declaim (ftype (function (transient-id t t t t fixnum shift test-function hash-function)
                           (values t t child-type bit &optional))
                 insert-alongside-entry))
-(defun insert-alongside-entry (neighbor-key neighbor-value key value hash shift test-function hash-function
+(defun insert-alongside-entry (transient-id neighbor-key neighbor-value key value hash shift test-function hash-function
                                &aux (neighbor-hash (funcall hash-function neighbor-key)))
   (cond ((and (= neighbor-hash hash)
               (funcall test-function neighbor-key key))
          (values key value :entry 0))
 
         ((= neighbor-hash hash)
-         (make-conflict-node hash 2 1 neighbor-key neighbor-value key value))
+         (make-conflict-node transient-id hash 2 1 neighbor-key neighbor-value key value))
 
-        (:else (promote-node neighbor-key neighbor-value neighbor-hash :entry
+        (:else (promote-node transient-id
+                             neighbor-key neighbor-value neighbor-hash :entry
                              key value hash :entry
                              shift 1))))
 
@@ -636,11 +839,17 @@ Precondition: (/= LEFT-HASH RIGHT-HASH), or else we would construct a unified `c
                    (conflict-node-logical-key-ref conflict-node logical-index))
       (return logical-index))))
 
-(declaim (ftype (function (conflict-node fixnum t t array-index)
+(declaim (ftype (function (transient-id conflict-node fixnum t t array-index)
                           (values fixnum conflict-node (eql :conflict-node) (eql 0) &optional))
-                conflict-node-replace-at-logical-index))
-(defun conflict-node-replace-at-logical-index (conflict-node hash new-key new-value logical-index)
-  (let* ((new-node (%make-conflict-node :length (conflict-node-paired-count conflict-node)))
+                conflict-node-copy-replace-at-logical-index))
+(defun conflict-node-copy-replace-at-logical-index (transient-id conflict-node hash new-key new-value logical-index)
+  "Do a functional update of CONFLICT-NODE, replacing the entry at LOGICAL-INDEX with (NEW-KEY => NEW-VALUE).
+
+The resulting node will have the TRANSIENT-ID installed.
+
+Return four values suitable for the insertion operation: (values MY-KEY MY-VALUE MY-TYPE DELTA-SIZE)."
+  (let* ((new-node (%make-conflict-node :transient-id transient-id
+                                        :length (conflict-node-paired-count conflict-node)))
          (replaced-key-true-index (conflict-node-key-true-index logical-index)))
     (sv-initialize new-node (:start-from +conflict-node-zero+)
       (:subrange conflict-node
@@ -649,18 +858,55 @@ Precondition: (/= LEFT-HASH RIGHT-HASH), or else we would construct a unified `c
       new-key
       new-value
       (:subrange conflict-node :start (+ 2 replaced-key-true-index)))
-    
+
     (values hash new-node :conflict-node 0)))
 
-(declaim (ftype (function (fixnum conflict-node t t)
+(declaim (ftype (function (conflict-node fixnum t t array-index)
+                          (values fixnum conflict-node (eql :conflict-node) (eql 0) &optional))
+                conflict-node-set-at-logical-index))
+(defun conflict-node-set-at-logical-index (conflict-node hash new-key new-value logical-index)
+  "Mutate the CONFLICT-NODE, replacing the entry at LOGICAL-INDEX with (NEW-KEY => NEW-VALUE).
+
+Invariant: the enclosing `transient' on which the current `insert!' operation is running must uniquely own the
+CONFLICT-NODE, that is, their ids must match.
+
+Return four values suitable for the insertion operation: (values MY-KEY MY-VALUE MY-TYPE DELTA-SIZE)."
+  (set-conflict-node-logical-entry conflict-node logical-index new-key new-value)
+  (values hash
+          conflict-node
+          :conflict-node
+          0))
+
+(declaim (ftype (function (transient-id transient-id) (values boolean &optional))
+                same-transient-id-p)
+         ;; Inlining may allow the compiler to avoid reifying the result into a `cl:boolean'.
+         (inline same-transient-id-p))
+(defun same-transient-id-p (a b)
+  (and a b (= a b)))
+
+(declaim (ftype (function (transient-id conflict-node fixnum t t array-index)
+                          (values fixnum conflict-node (eql :conflict-node) (eql 0) &optional))
+                conflict-node-replace-at-logical-index))
+(defun conflict-node-replace-at-logical-index (transient-id conflict-node hash new-key new-value logical-index)
+  (if (same-transient-id-p transient-id (conflict-node-transient-id conflict-node))
+      ;; If we're a transient and we uniquely own this node, mutate it.
+      (conflict-node-set-at-logical-index conflict-node hash new-key new-value logical-index)
+      ;; Otherwise, do a functional update.
+      (conflict-node-copy-replace-at-logical-index transient-id conflict-node hash new-key new-value logical-index)))
+
+(declaim (ftype (function (transient-id fixnum conflict-node t t)
                           (values fixnum conflict-node (eql :conflict-node) (eql 1) &optional))
                 add-to-conflict-node))
-(defun add-to-conflict-node (hash conflict-node new-key new-value)
-  "Add NEW-ENTRY into the entries of CONFLICT-NODE.
+(defun add-to-conflict-node (transient-id hash conflict-node new-key new-value)
+  "Add (NEW-KEY => NEW-VALUE) into the entries of CONFLICT-NODE.
+
+Because `conflict-node's are not adjustable, this operation must always copy CONFLICT-NODE. The TRANSIENT-ID
+will be installed in the new node, potentially allowing future transient operations to mutate it.
 
 Precondition: NEW-ENTRY has the same hash as CONFLICT-NODE, and no existing entry in CONFLICT-NODE has the
               same key as NEW-ENTRY."
-  (let* ((new-node (%make-conflict-node :length (logical-count-to-paired-length
+  (let* ((new-node (%make-conflict-node :transient-id transient-id
+                                        :length (logical-count-to-paired-length
                                                  (1+ (conflict-node-logical-length conflict-node))))))
 
     (sv-initialize new-node (:start-from +conflict-node-zero+)
@@ -673,54 +919,75 @@ Precondition: NEW-ENTRY has the same hash as CONFLICT-NODE, and no existing entr
             :conflict-node
             1)))
 
-(declaim (ftype (function (fixnum conflict-node t t fixnum shift test-function)
+(declaim (ftype (function (transient-id fixnum conflict-node t t fixnum shift test-function)
                           (values t t child-type bit &optional))
                 insert-into-conflict-node))
-(defun insert-into-conflict-node (conflict-hash conflict-node new-key new-value hash shift test-function)
+(defun insert-into-conflict-node (transient-id conflict-hash conflict-node new-key new-value hash shift test-function)
   "Add a new entry (KEY -> VALUE) to or alongside CONFLICT-NODE.
 
 Depending on whether HASH is the same as the hash in CONFLICT-NODE, this may allocate a new `hash-node' to
-contain both the existing CONFLICT-NODE and the new entry."
+contain both the existing CONFLICT-NODE and the new entry.
+
+If TRANSIENT-ID matches the id of the CONFLICT-NODE, this operation may mutate CONFLICT-NODE and return it
+instead of allocating a new node. If a new node is allocated, the TRANSIENT-ID will be installed as its id."
   (let* ((same-hash-p (= conflict-hash hash))
          (logical-index (when same-hash-p
                           (conflict-node-logical-index-of conflict-node new-key test-function))))
     (cond ((and same-hash-p logical-index)
-           ;; If CONFLICT-NODE already contains a mapping for KEY, replace it.
-           (conflict-node-replace-at-logical-index conflict-node hash new-key new-value logical-index))
+           ;; If CONFLICT-NODE already contains a mapping for KEY, replace it. This is the case where we can
+           ;; mutate if the transient ids match.
+           (conflict-node-replace-at-logical-index transient-id conflict-node hash new-key new-value logical-index))
 
           (same-hash-p
-           ;; If the new mapping conflicts with CONFLICT-NODE but is not already present, add it.
-           (add-to-conflict-node hash conflict-node new-key new-value))
+           ;; If the new mapping conflicts with CONFLICT-NODE but is not already present, add it. This will
+           ;; always allocate a new `conflict-node' regardless of transient-ness, because `conflict-node's are
+           ;; not adjustable.
+           (add-to-conflict-node transient-id hash conflict-node new-key new-value))
 
           (:else
            ;; If the new mapping does not conflict, grow a new `hash-node' with the CONFLICT-NODE and the new
-           ;; entry as siblings.
-           (promote-node conflict-hash conflict-node conflict-hash :conflict-node
+           ;; entry as siblings. This will (obviously) allocate a new `hash-node', regardless of transient-ness.
+           (promote-node transient-id
+                         conflict-hash conflict-node conflict-hash :conflict-node
                          new-key new-value hash :entry
                          shift
                          1)))))
 
-(declaim (ftype (function (bitmap hash-node
+(declaim (ftype (function (bitmap child-type child-type hash-node-logical-index) (values bitmap &optional))
+                bitmap-set-if-same-type-or-unset))
+(defun bitmap-set-if-same-type-or-unset (bitmap a b logical-index)
+  (if (eq a b)
+      (set-bit bitmap logical-index)
+      (unset-bit bitmap logical-index)))
+
+(declaim (ftype (function (transient-id
+                           bitmap hash-node
                            hash-node-logical-index
                            t t child-type
                            t)
                           (values bitmap hash-node (eql :hash-node) t &optional))
-                hash-node-replace-at))
-(defun hash-node-replace-at (bitmap hash-node
-                             logical-index
-                             new-key new-value new-type
-                             additional-return-value)
+                hash-node-copy-replace-at))
+(defun hash-node-copy-replace-at (transient-id
+                                  bitmap hash-node
+                                  logical-index
+                                  new-key new-value new-type
+                                  additional-return-value)
+  "Do a functional update of HASH-NODE, replacing the entry at LOGICAL-INDEX with (NEW-KEY => NEW-VALUE).
+
+The resulting node will have TRANSIENT-ID installed.
+
+Return four values suitable for the insertion or removal operation:
+(values MY-KEY MY-VALUE MY-TYPE ADDITIONAL-RETURN-VALUE)."
   (let* ((new-elt-key-true-index (hash-node-key-true-index bitmap logical-index))
-         (new-node (%make-hash-node :child-is-entry-p (if (eq new-type :entry)
-                                                          (set-bit (hash-node-child-is-entry-p hash-node)
-                                                                   logical-index)
-                                                          (unset-bit (hash-node-child-is-entry-p hash-node)
-                                                                     logical-index))
-                                    :child-is-conflict-p (if (eq new-type :conflict-node)
-                                                             (set-bit (hash-node-child-is-conflict-p hash-node)
-                                                                      logical-index)
-                                                             (unset-bit (hash-node-child-is-conflict-p hash-node)
-                                                                        logical-index))
+         (new-node (%make-hash-node :transient-id transient-id
+                                    :child-is-entry-p (bitmap-set-if-same-type-or-unset
+                                                       (hash-node-child-is-entry-p hash-node)
+                                                       new-type :entry
+                                                       logical-index)
+                                    :child-is-conflict-p (bitmap-set-if-same-type-or-unset
+                                                          (hash-node-child-is-conflict-p hash-node)
+                                                          new-type :conflict-node
+                                                          logical-index)
                                     :length (hash-node-paired-count hash-node))))
 
     (sv-initialize new-node (:start-from +hash-node-zero+)
@@ -742,17 +1009,80 @@ contain both the existing CONFLICT-NODE and the new entry."
 
 (declaim (ftype (function (bitmap hash-node
                                   hash-node-logical-index
-                                  t t child-type)
+                                  t t child-type
+                                  t)
+                          (values bitmap hash-node (eql :hash-node) t &optional))
+                hash-node-set-at-logical-index))
+(defun hash-node-set-at-logical-index (bitmap hash-node
+                                       logical-index
+                                       new-key new-value new-type
+                                       additional-return-value)
+  "Mutate HASH-NODE, replacing the entry at LOGICAL-INDEX with (NEW-KEY => NEW-VALUE).
+
+Invariant: the enclosing `transient' on which the current `insert!' or `remove!' operation is running must
+uniquely own the HASH-NODE, that is, their ids must match.
+
+Return four values suitable for the insertion or removal operation:
+(values MY-KEY MY-VALUE MY-TYPE ADDITIONAL-RETURN-VALUE)."
+  (set-hash-node-logical-entry bitmap hash-node
+                               logical-index
+                               new-key new-value)
+  (setf (hash-node-child-is-entry-p hash-node)
+        (bitmap-set-if-same-type-or-unset (hash-node-child-is-entry-p hash-node)
+                                          new-type :entry
+                                          logical-index))
+  (setf (hash-node-child-is-conflict-p hash-node)
+        (bitmap-set-if-same-type-or-unset (hash-node-child-is-conflict-p hash-node)
+                                          new-type :conflict-node
+                                          logical-index))
+  (values bitmap
+          hash-node
+          :hash-node
+          additional-return-value))
+
+(declaim (ftype (function (transient-id
+                           bitmap hash-node
+                           hash-node-logical-index
+                           t t child-type
+                           t)
+                          (values bitmap hash-node (eql :hash-node) t &optional))
+                hash-node-replace-at))
+(defun hash-node-replace-at (transient-id
+                             bitmap hash-node
+                             logical-index
+                             new-key new-value new-type
+                             additional-return-value)
+  (if (same-transient-id-p transient-id (hash-node-transient-id hash-node))
+      (hash-node-set-at-logical-index bitmap hash-node
+                                      logical-index
+                                      new-key new-value new-type
+                                      additional-return-value)
+      (hash-node-copy-replace-at transient-id
+                                 bitmap hash-node
+                                 logical-index
+                                 new-key new-value new-type
+                                 additional-return-value)))
+
+(declaim (ftype (function (transient-id
+                           bitmap hash-node
+                           hash-node-logical-index
+                           t t child-type)
                           (values bitmap hash-node (eql :hash-node) (eql 1) &optional))
                 hash-node-insert-at))
-(defun hash-node-insert-at (bitmap hash-node
+(defun hash-node-insert-at (transient-id
+                            bitmap hash-node
                             logical-index
                             child-key child-value child-type)
+  "Add (NEW-KEY => NEW-VALUE) into the entries of HASH-NODE at LOGICAL-INDEX.
+
+Because `hash-node's are not adjustable, this operation must always copy HASH-NODE. The TRANSIENT-ID will be
+installed in the new node, potentially allowing future transient operations to mutate it."
   (let* ((new-bitmap (set-bit bitmap
                               logical-index))
          (new-paired-length (logical-count-to-paired-length (1+ (hash-node-logical-count hash-node))))
          (new-elt-key-true-index (hash-node-key-true-index new-bitmap logical-index))
-         (new-node (%make-hash-node :child-is-entry-p (if (eq child-type :entry)
+         (new-node (%make-hash-node :transient-id transient-id
+                                    :child-is-entry-p (if (eq child-type :entry)
                                                           (set-bit (hash-node-child-is-entry-p hash-node)
                                                                    logical-index)
                                                           (hash-node-child-is-entry-p hash-node))
@@ -780,22 +1110,27 @@ contain both the existing CONFLICT-NODE and the new entry."
             1)))
 
 ;; predeclaration for type inference on recursive calls by `insert-into-hash-node'
-(declaim (ftype (function (child-type t t t t fixnum shift test-function hash-function)
+(declaim (ftype (function (transient-id child-type t t t t fixnum shift test-function hash-function)
                           (values t t child-type bit &optional))
                 node-insert))
 
-(declaim (ftype (function (bitmap hash-node t t fixnum shift test-function hash-function)
+(declaim (ftype (function (transient-id
+                           bitmap hash-node
+                           t t fixnum
+                           shift
+                           test-function hash-function)
                           (values bitmap hash-node (eql :hash-node) bit &optional))
                 insert-into-hash-node))
-(defun insert-into-hash-node (bitmap
-                              hash-node
-                              key
-                              value
-                              hash
+(defun insert-into-hash-node (transient-id
+                              bitmap hash-node
+                              key value hash
                               shift
                               test-function
                               hash-function)
-  "Add a new entry (KEY -> VALUE) as a child of HASH-NODE."
+  "Add a new entry (KEY -> VALUE) as a child of HASH-NODE.
+
+If TRANSIENT-ID matches the id of the HASH-NODE, this operation may mutate HASH-NODE and return it rather than
+allocating a new node. If a new node is allocated, the TRANSIENT-ID will be installed as its id."
   (let* ((logical-index (extract-hash-part-for-shift shift hash)))
     (if-let ((child-type (hash-node-child-type hash-node bitmap logical-index)))
 
@@ -803,21 +1138,32 @@ contain both the existing CONFLICT-NODE and the new entry."
       (multiple-value-bind (child-key child-value)
           (hash-node-logical-ref hash-node bitmap logical-index)
         (multiple-value-bind (new-child-key new-child-val new-child-type num-added)
-            (node-insert child-type
+            (node-insert transient-id
+                         child-type
                          child-key child-value
                          key value hash
                          (1+ shift) test-function hash-function)
-          (hash-node-replace-at bitmap hash-node
+          ;; This operation may, depending on transient-ness and ownership, mutate the HASH-NODE rather than
+          ;; copying.
+          (hash-node-replace-at transient-id
+                                bitmap hash-node
                                 logical-index
                                 new-child-key new-child-val new-child-type
                                 num-added)))
 
-      ;; If the hash node doesn't have a child there yet, insert one.
-      (hash-node-insert-at bitmap hash-node
+      ;; If the hash node doesn't have a child there yet, insert one. This will always copy HASH-NODE, because
+      ;; `hash-node's are not adjustable.
+      (hash-node-insert-at transient-id
+                           bitmap hash-node
                            logical-index
                            key value :entry))))
 
-(defun node-insert (body-type body-key body-value key value hash shift test-function hash-function)
+(defun node-insert (transient-id
+                    body-type body-key body-value
+                    key value
+                    hash
+                    shift
+                    test-function hash-function)
   "Make KEY map to VALUE within NODE.
 
 Returns a new node like NODE, but with the mapping (KEY -> VALUE). If KEY is already associated with a value
@@ -828,18 +1174,36 @@ HASH is the result of applying the containing `dict' 's HASH-FUNCTION to KEY.
 SHIFT is the depth into the trie of NODE. For a `dict' 's BODY, this will be 0.
 
 TEST-FUNCTION is the containing `dict' 's TEST-FUNCTION, which must satisfy the hash-test-function laws with
-the HASH-FUNCTION used to generate HASH."
+the HASH-FUNCTION used to generate HASH.
+
+If the BODY-TYPE is `:conflict-node' or `:hash-node', and the TRANSIENT-ID matches the BODY-VALUE's id, this
+operation may mutate the BODY-VALUE and return it rather than allocating a new node. Any new nodes allocated
+will have the TRANSIENT-ID installed as their id."
   (ecase body-type
     ((nil) (values key value :entry 1))
-    (:entry (insert-alongside-entry body-key body-value key value hash shift test-function hash-function))
-    (:conflict-node (insert-into-conflict-node body-key body-value key value hash shift test-function))
+    (:entry (insert-alongside-entry transient-id
+                                    body-key body-value
+                                    key value hash
+                                    shift
+                                    test-function hash-function))
+    (:conflict-node (insert-into-conflict-node transient-id
+                                               body-key body-value
+                                               key value
+                                               hash
+                                               shift
+                                               test-function))
     (:hash-node
-     (insert-into-hash-node body-key body-value key value hash shift test-function hash-function))))
+     (insert-into-hash-node transient-id
+                            body-key body-value
+                            key value
+                            hash
+                            shift
+                            test-function hash-function))))
 
 (declaim (ftype (function (dict t t) (values dict &optional))
                 insert))
 (defun insert (dict key value)
-  "Associate a KEY with a VALUE.
+  "Associate KEY with VALUE in DICT.
 
 Returns a new `dict' like DICT, with KEY mapping to VALUE. If DICT already contains a mapping for KEY, the old
 mapping is replaced."
@@ -852,7 +1216,7 @@ mapping is replaced."
       dict
     (let* ((hash (funcall hash-function key)))
       (multiple-value-bind (new-body-key new-body-value new-type added-count)
-          (node-insert body-type body-key body-value key value hash 0 test-function hash-function)
+          (node-insert nil body-type body-key body-value key value hash 0 test-function hash-function)
         (%make-dict :size (+ size added-count)
                     :hash-function hash-function
                     :test-function test-function
@@ -860,17 +1224,55 @@ mapping is replaced."
                     :value new-body-value
                     :child-type new-type)))))
 
-;;; TODO: left off converting to new node repr here
+(declaim (ftype (function (transient t t) (values transient &optional))
+                insert!))
+(defun insert! (transient key value)
+  "Associate KEY with VALUE in TRANSIENT.
+
+This operation will avoid consing by mutating uniquely owned substructures of TRANSIENT when possible.
+
+The return value will always be `eq' to TRANSIENT."
+  (with-accessors ((hash-function %transient-hash-function)
+                   (test-function %transient-test-function)
+                   (body-key %transient-key)
+                   (body-value %transient-value)
+                   (body-type %transient-child-type)
+                   (size %transient-size)
+                   (id %transient-id))
+      transient
+    (if (null id)
+        (error 'stale-transient
+               :operation 'insert!
+               :transient transient)
+        (let* ((hash (funcall hash-function key)))
+          (multiple-value-bind (new-body-key new-body-value new-type added-count)
+              (node-insert id body-type body-key body-value key value hash 0 test-function hash-function)
+            (setf body-key new-body-key)
+            (setf body-value new-body-value)
+            (setf body-type new-type)
+            (incf size added-count)
+            transient)))))
 
 ;;; REMOVE and helpers
 
-(declaim (ftype (function (fixnum conflict-node array-index)
+;; All the REMOVE helper functions will return four values:
+;; - NEW-KEY, the key part of the resulting node.
+;; - NEW-VALUE, the value part of the resulting node.
+;; - NEW-TYPE, the `child-type' of the resulting node.
+;; - REMOVED-P, a boolean which is true if the size of the resulting node has changed by removing a child, or
+;;   nil if no entry was removed.
+
+(declaim (ftype (function (transient-id fixnum conflict-node array-index)
                           (values fixnum conflict-node (eql :conflict-node) (eql t) &optional))
                 conflict-node-remove-at-logical-index))
-(defun conflict-node-remove-at-logical-index (conflict-hash conflict-node logical-index
-                                              &aux )
+(defun conflict-node-remove-at-logical-index (transient-id conflict-hash conflict-node logical-index)
+  "Remove the mapping in CONFLICT-NODE at LOGICAL-INDEX.
+
+Because `conflict-node's are not adjustable, this operation must always copy CONFLICT-NODE. The TRANSIENT-ID
+will be installed in the new node, potentially allowing future transient operations to mutate it."
   (let* ((key-true-index (conflict-node-key-true-index logical-index))
-         (new-node (%make-conflict-node :length (logical-count-to-paired-length
+         (new-node (%make-conflict-node :transient-id transient-id
+                                        :length (logical-count-to-paired-length
                                                    (1- (conflict-node-logical-length conflict-node))))))
     (sv-initialize new-node (:start-from +conflict-node-zero+)
       (:subrange conflict-node
@@ -878,7 +1280,7 @@ mapping is replaced."
        :start +conflict-node-zero+)
       (:subrange conflict-node
        :start (+ 2 key-true-index)))
-    
+
     (values conflict-hash
 
             new-node
@@ -887,13 +1289,16 @@ mapping is replaced."
 
             t)))
 
-(declaim (ftype (function (fixnum conflict-node t test-function)
+(declaim (ftype (function (transient-id fixnum conflict-node t test-function)
                           (values t t child-type boolean &optional))
                 conflict-node-remove))
-(defun conflict-node-remove (conflict-hash conflict-node key test-function)
+(defun conflict-node-remove (transient-id conflict-hash conflict-node key test-function)
   "Remove the entry for KEY from CONFLICT-NODE, if any.
 
 If CONFLICT-NODE does not contain an entry for KEY, the returned node will be `eq' to CONFLICT-NODE.
+
+Because `conflict-node's are not adjustable, this operation must copy CONFLICT-NODE if the KEY is present. The
+TRANSIENT-ID will be installed in the new node, potentially allowing future transient operations to mutate it.
 
 Precondition: KEY has the same hash as the CONFLICT-NODE."
 
@@ -909,16 +1314,19 @@ Precondition: KEY has the same hash as the CONFLICT-NODE."
           (values other-key other-value :entry t))
 
         ;; Otherwise, copy the conflict-node with the offending entry removed.
-        (conflict-node-remove-at-logical-index conflict-hash conflict-node logical-index))
+        (conflict-node-remove-at-logical-index transient-id conflict-hash conflict-node logical-index))
 
     ;; If not present, return the conflict-node unchanged.
     (values conflict-hash conflict-node :conflict-node nil)))
 
-(declaim (ftype (function (bitmap hash-node hash-node-logical-index)
+(declaim (ftype (function (transient-id bitmap hash-node hash-node-logical-index)
                           (values bitmap hash-node (eql :hash-node) (eql t) &optional))
                 hash-node-remove-at-logical-index))
-(defun hash-node-remove-at-logical-index (bitmap hash-node logical-index-to-remove)
+(defun hash-node-remove-at-logical-index (transient-id bitmap hash-node logical-index-to-remove)
   "Remove from HASH-NODE the child named by INDEX-TO-REMOVE and TRUE-INDEX-TO-REMOVE.
+
+Because `hash-node's are not adjustable, this operation must copy HASH-NODE. The TRANSIENT-ID will be
+installed in the new node, potentially allowing future transient operations to mutate it.
 
 Precondition: HASH-NODE must `hash-node-contains-p' INDEX-TO-REMOVE, and TRUE-INDEX-TO-REMOVE must be the
               `hash-node-true-index' of INDEX-TO-REMOVE."
@@ -926,10 +1334,13 @@ Precondition: HASH-NODE must `hash-node-contains-p' INDEX-TO-REMOVE, and TRUE-IN
                                     logical-index-to-remove))
          (removed-child-is-entry-p (unset-bit (hash-node-child-is-entry-p hash-node)
                                               logical-index-to-remove))
+         ;; TODO: Surely this is only ever called for entry children, not conflict-nodes, right? So this
+         ;;       should be a no-op.
          (removed-child-is-conflict-p (unset-bit (hash-node-child-is-conflict-p hash-node)
                                                  logical-index-to-remove))
          (removed-key-true-index (hash-node-key-true-index bitmap logical-index-to-remove))
-         (new-node (%make-hash-node :child-is-entry-p removed-child-is-entry-p
+         (new-node (%make-hash-node :transient-id transient-id
+                                    :child-is-entry-p removed-child-is-entry-p
                                     :child-is-conflict-p removed-child-is-conflict-p
                                     :length (logical-count-to-paired-length (1- (hash-node-logical-count hash-node))))))
 
@@ -948,26 +1359,33 @@ Precondition: HASH-NODE must `hash-node-contains-p' INDEX-TO-REMOVE, and TRUE-IN
 (defun bitmap-other-logical-index (bitmap logical-index)
   (1- (integer-length (unset-bit bitmap logical-index))))
 
-(declaim (ftype (function (bitmap hash-node hash-node-logical-index)
+(declaim (ftype (function (transient-id bitmap hash-node hash-node-logical-index)
                           (values t t child-type (eql t) &optional))
                 hash-node-maybe-promote-other-child))
-(defun hash-node-maybe-promote-other-child (bitmap hash-node logical-index-to-discard)
+(defun hash-node-maybe-promote-other-child (transient-id bitmap hash-node logical-index-to-discard)
   (let* ((logical-index-to-keep (bitmap-other-logical-index bitmap logical-index-to-discard))
          (child-type (hash-node-child-type hash-node bitmap logical-index-to-keep)))
     (multiple-value-bind (child-key child-value) (hash-node-logical-ref hash-node bitmap logical-index-to-keep)
       (if (eq child-type :hash-node)
-          ;; Cannot promote, because the child is a hash-node with a greater shift than us.
-          (make-one-entry-hash-node child-key child-value child-type logical-index-to-keep t)
+          ;; Cannot promote, because the child is a hash-node with a greater shift than us. Build a new
+          ;; one-entry hash-node to house the lonely child.
+          (make-one-entry-hash-node transient-id child-key child-value child-type logical-index-to-keep t)
 
           ;; Can promote, because the child is an entry or a conflict-node
           (values child-key child-value child-type t)))))
 
-(declaim (ftype (function (bitmap hash-node
+;; Predeclaration for better type inference in recursive calls by `hash-node-remove'.
+(declaim (ftype (function (transient-id child-type t t t fixnum shift test-function)
+                          (values t t child-type boolean &optional))
+                node-remove))
+
+(declaim (ftype (function (transient-id bitmap hash-node
                            t fixnum hash-node-logical-index
                            shift test-function)
                           (values t t child-type boolean &optional))
                 hash-node-remove))
-(defun hash-node-remove (bitmap hash-node
+(defun hash-node-remove (transient-id
+                         bitmap hash-node
                          key hash logical-index
                          shift test-function)
   (flet ((return-unchanged ()
@@ -975,7 +1393,8 @@ Precondition: HASH-NODE must `hash-node-contains-p' INDEX-TO-REMOVE, and TRUE-IN
     (if-let ((child-type (hash-node-child-type hash-node bitmap logical-index)))
       (multiple-value-bind (child-key child-value) (hash-node-logical-ref hash-node bitmap logical-index)
         (multiple-value-bind (new-child-key new-child-value new-child-type removedp)
-            (node-remove child-type child-key child-value
+            (node-remove transient-id
+                         child-type child-key child-value
                          key hash
                          (1+ shift) test-function)
           (cond ((not removedp)
@@ -990,26 +1409,26 @@ Precondition: HASH-NODE must `hash-node-contains-p' INDEX-TO-REMOVE, and TRUE-IN
                 ((and (null new-child-type)
                       (= 2 (hash-node-logical-count hash-node)))
                  ;; If we're removing one of two children, try to reduce nesting.
-                 (hash-node-maybe-promote-other-child bitmap hash-node logical-index))
+                 (hash-node-maybe-promote-other-child transient-id bitmap hash-node logical-index))
 
                 ((null new-child-type)
                  ;; If we removed an entire child, the resulting hash node will have one fewer entries than
                  ;; HASH-NODE.
-                 (hash-node-remove-at-logical-index bitmap hash-node logical-index))
+                 (hash-node-remove-at-logical-index transient-id bitmap hash-node logical-index))
 
                 (:else
-                 ;; If we removed from a child that still has other entries, splice the new child back in.
-                 (hash-node-replace-at bitmap hash-node
+                 ;; If we removed from a child that still has other entries, splice the new child back
+                 ;; in. This is the only branch that will potentially mutate HASH-NODE when it is an owned
+                 ;; transient.
+                 (hash-node-replace-at transient-id
+                                       bitmap hash-node
                                        logical-index
                                        new-child-key new-child-value new-child-type
                                        t)))))
 
       (return-unchanged))))
 
-(declaim (ftype (function (child-type t t t fixnum shift test-function)
-                          (values t t child-type boolean &optional))
-                node-remove))
-(defun node-remove (body-type body-key body-value key hash shift test-function)
+(defun node-remove (transient-id body-type body-key body-value key hash shift test-function)
   "Make KEY unmapped within the node (BODY-KEY BODY-VALUE).
 
 Returns (values NEW-BODY-KEY NEW-BODY-VALUE NEW-BODY-TYPE REMOVEDP).
@@ -1034,13 +1453,14 @@ the HASH-FUNCTION used to generate HASH."
 
       (:conflict-node
        (if (= hash (the fixnum body-key))
-           (conflict-node-remove body-key body-value key test-function)
+           (conflict-node-remove transient-id body-key body-value key test-function)
            (not-found)))
 
       (:hash-node (let* ((logical-index (extract-hash-part-for-shift shift hash)))
                     (if (bitmap-contains-p (the bitmap body-key)
                                            logical-index)
-                        (hash-node-remove body-key body-value
+                        (hash-node-remove transient-id
+                                          body-key body-value
                                           key hash logical-index
                                           shift test-function)
                         (not-found)))))))
@@ -1064,7 +1484,11 @@ If DICT does not contain a mapping for KEY, the returned `dict' will be `eq' to 
         dict
         (let* ((hash (funcall hash-function key)))
           (multiple-value-bind (new-key new-value new-child-type removed-p)
-              (node-remove body-type body-key body-value key hash 0 test-function)
+              (node-remove nil
+                           body-type body-key body-value
+                           key hash
+                           0
+                           test-function)
             (if removed-p
                 (%make-dict :size (1- size)
                             :hash-function hash-function
@@ -1073,6 +1497,40 @@ If DICT does not contain a mapping for KEY, the returned `dict' will be `eq' to 
                             :value new-value
                             :child-type new-child-type)
                 dict))))))
+
+(declaim (ftype (function (transient t) (values transient &optional))
+                remove!))
+(defun remove! (transient key)
+  "Make KEY unmapped in TRANSIENT.
+
+This operation will avoid consing by mutating uniquely owned substructures of TRANSIENT when possible.
+
+The return value will always be `eq' to TRANSIENT."
+  (with-accessors ((hash-function %transient-hash-function)
+                   (test-function %transient-test-function)
+                   (body-key %transient-key)
+                   (body-value %transient-value)
+                   (body-type %transient-child-type)
+                   (size %transient-size)
+                   (id %transient-id))
+      transient
+    (if (null id)
+        (error 'stale-transient
+               :operation 'remove!
+               :transient transient)
+        (let* ((hash (funcall hash-function key)))
+          (multiple-value-bind (new-key new-value new-child-type removed-p)
+              (node-remove id
+                           body-type body-key body-value
+                           key hash
+                           0
+                           test-function)
+            (when removed-p
+              (setf body-key new-key)
+              (setf body-value new-value)
+              (setf body-type new-child-type)
+              (decf size))
+            transient)))))
 
 ;; ;;; finding appropriate hash functions for a given test function
 
