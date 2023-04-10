@@ -26,9 +26,10 @@
 
 ;;; early defs
 
-(deftype generator (&optional (element-type 't))
+(deftype generator (&rest elements)
   "A generator is a closure which takes no arguments and returns successive elements on each invocation, signaling `done' when no elements remain."
-  `(function () (values ,element-type &optional)))
+  (let* ((elements (or elements '(&rest t))))
+    `(function () (values ,@elements))))
 
 (define-condition done ()
   ())
@@ -48,7 +49,7 @@ VARS are treated as in `let*'."
               ,@body))
        #'generator-closure)))
 
-(declaim (ftype (function (generator) (values t &optional)) advance)
+(declaim (ftype (function (generator) (values &rest t)) advance)
          (inline advance))
 (defun advance (generator)
   "Advance GENERATOR, returning its next element, or signaling `done' if none remain."
@@ -177,7 +178,7 @@ arglist respectively."
         ,@(when keyp `(&key ,@(mapcar #'typed-key-arg-binding key)))
         ,@(when allow-other-keys-p `(&allow-other-keys))))))
 
-(defmacro define-indefinite-extent-generator (make-generator (&rest typed-args) docstring (&rest bindings) &body generator-body)
+(defmacro define-indefinite-extent-generator (make-generator (&rest typed-args) docstring (&rest bindings) (&body setup) &body generator-body)
   "Define a function named MAKE-GENERATOR which produces a generator.
 
 - MAKE-GENERATOR should be a symbol which will be defined as a new function.
@@ -188,6 +189,8 @@ arglist respectively."
 - BINDINGS should each be a (NAME INITFORM) pair, which will be bound by `let*' around the GENERATOR-BODY. The
   INITFORMs may refer to previous BINDINGS, and to the TYPED-ARGS. These bindings will persist between
   multiple invocations of a generator, and can be used to store mutable state.
+- SETUP should be expressions which will be run once within the scope of the BINDINGS, before the
+  GENERATOR-BODY.
 - GENERATOR-BODY should be expressions which will be evaluated on each invocation of the resulting
   generator. They should either return the next value to be yielded by the generator, or call `done' to signal
   the end of the generator."
@@ -199,9 +202,10 @@ arglist respectively."
      (defun ,make-generator (,@(typed-arglist-to-lambda-list typed-args))
        ,docstring
        (let* (,@bindings)
+         ,@setup
          (lambda () ,@generator-body)))))
 
-(defmacro define-dynamic-extent-generator (with-generator call-with-generator (&rest typed-args) docstring (&rest bindings) &body generator-body)
+(defmacro define-dynamic-extent-generator (with-generator call-with-generator (&rest typed-args) docstring (&rest bindings) (&body setup) &body generator-body)
   "Define a macro named WITH-GENERATOR which evaluates its body in a dynamic context with access to a generator.
 
 - WITH-GENERATOR should be a symbol which will be defined as a new macro.
@@ -214,6 +218,8 @@ arglist respectively."
 - BINDINGS should each be a (NAME INITFORM) pair, which will be bound by `let*' around the GENERATOR-BODY. The
   INITFORMs may refer to previous BINDINGS, and to the TYPED-ARGS. These bindings will persist between
   multiple invocations of a generator, and can be used to store mutable state.
+- SETUP should be expressions which will be run once within the scope of the BINDINGS, before the
+  GENERATOR-BODY.
 - GENERATOR-BODY should be expressions which will be evaluated on each invocation of the resulting
   generator. They should either return the next value to be yielded by the generator, or call `done' to signal
   the end of the generator.
@@ -239,6 +245,12 @@ Where
                 (inline ,call-with-generator))
        (defun ,call-with-generator (thunk ,@(typed-arglist-to-lambda-list typed-args))
          (let* (,@bindings)
+           (declare (dynamic-extent ,@(mapcar (lambda (binding)
+                                                (etypecase binding
+                                                  (symbol binding)
+                                                  (cons (first binding))))
+                                              bindings)))
+           ,@setup
            (flet ((generator ()
                     ,@generator-body))
              (declare (dynamic-extent #'generator))
@@ -252,7 +264,7 @@ Where
                       (list 'function ',with-generator-body-function)
                       args))))))
 
-(defmacro define-generator (name (&rest typed-args) docstring (&rest bindings) &body generator-body)
+(defmacro define-generator (name (&rest typed-args) docstring (&rest bindings) (&body setup) &body generator-body)
   "Define a function NAME-generator and a macro with-NAME-generator for indefinite-extent and dynamic-extent generators, respectively.
 
 - NAME should be a symbol which will be combined with the parts \"GENERATE-~a\" and \"WITH-~a-GENERATOR\" to
@@ -263,6 +275,8 @@ Where
 - BINDINGS should each be a (NAME INITFORM) pair, which will be bound by `let*' around the GENERATOR-BODY. The
   INITFORMs may refer to previous BINDINGS, and to the TYPED-ARGS. These bindings will persist between
   multiple invocations of a generator, and can be used to store mutable state.
+- SETUP should be expressions which will be run once within the scope of the BINDINGS, before the
+  GENERATOR-BODY.
 - GENERATOR-BODY should be expressions which will be evaluated on each invocation of the resulting
   generator. They should either return the next value to be yielded by the generator, or call `done' to signal
   the end of the generator."
@@ -271,17 +285,20 @@ Where
          ,typed-args
          ,docstring
          ,bindings
+       ,setup
        ,@generator-body)
      (define-dynamic-extent-generator ,(intern (format nil "WITH-~a-GENERATOR" name) *package*)
          ,(intern (format nil "CALL-WITH-~a-GENERATOR" name) *package*)
          ,typed-args
          ,docstring
          ,bindings
-         ,@generator-body)))
+         ,setup
+       ,@generator-body)))
 
 (define-generator list ((list list))
                   "Generate elements of LIST in order left-to-right."
     ((next list))
+    ()
   (if next
       (pop next)
       (done)))
@@ -312,6 +329,7 @@ Making any of these actions may cause a generator which had previously signaled 
 new elements, or do other weird stuff."
     ((i start)
      (limit (min end (length vector))))
+    ()
   (declare (type array-index i))
   (if (< i limit) (prog1 (aref vector i)
                     (incf i))
@@ -374,6 +392,7 @@ element; lambda lists will be applied to all the values of each element."
 (define-generator concat (&rest (generators generator))
                   "A generator which yields all of the elements of the GENERATORS, in order from left to right."
     ((stack generators))
+    ()
   (labels ((get-next ()
              (if (null stack)
                  (done)
@@ -386,6 +405,7 @@ element; lambda lists will be applied to all the values of each element."
 (define-generator take ((generator generator) (count (and unsigned-byte fixnum)))
                   "A generator which yields at most COUNT elements of GENERATOR."
     ((remaining count))
+    ()
   (declare ((and unsigned-byte fixnum) remaining))
   (if (not (plusp remaining))
       (done)

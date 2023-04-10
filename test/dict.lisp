@@ -9,6 +9,8 @@
   (:export #:immutable-dict-suite))
 (in-package :immutable/test/dict)
 
+(declaim (optimize (debug 3) (speed 2) (safety 3) (space 1) (compilation-speed 0)))
+
 (def-suite immutable-dict-suite)
 
 (declaim (ftype (function (dict::shift fixnum) (values fixnum &optional))
@@ -82,10 +84,11 @@
               (logcount bitmap)))
        (is (zerop (logand (dict::hash-node-child-is-entry-p hash-node)
                           (dict::hash-node-child-is-conflict-p hash-node))))
-       (is (zerop (logandc2 (dict::hash-node-child-is-entry-p hash-node)
-                            bitmap)))
-       (is (zerop (logandc2 (dict::hash-node-child-is-conflict-p hash-node)
-                            bitmap)))
+       (is (<= (logcount (dict::hash-node-child-is-entry-p hash-node))
+               (logcount bitmap)))
+       (is (<= (logcount (dict::hash-node-child-is-conflict-p hash-node))
+               (logcount bitmap)))
+
        (iter (for logical-index below dict::+branch-rate+)
          (for child-type = (dict::hash-node-child-type hash-node bitmap logical-index))
          (unless child-type (next-iteration))
@@ -318,6 +321,7 @@
 (def-test detect-stale-transient (:suite immutable-dict-suite)
   (let* ((transient (dict:transient (dict:empty)))
          (persistent (dict:persistent! transient)))
+    (is-dict-valid persistent)
     ;; operations that are disallowed on stale transients
     (signals-with (dict:stale-transient (eq transient dict:stale-transient-transient)
                                         (eq 'dict:insert! dict:stale-transient-operation))

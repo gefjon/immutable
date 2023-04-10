@@ -111,7 +111,7 @@ shadow CL symbols liberally to accomplish this.
     - [x] tests
   - [x] optimize node definitions to store key/value pairs inline.
     - [ ] convenient internal iterators over the children of a `hash-node` or `conflict-node`?
-  - [ ] internal iteration facility
+  - [x] internal iteration facility
   - [ ] convert from CL collections - `from-hash-table`, `from-alist`?
   - [ ] convert to CL collections - `to-hash-table`, `to-alist`?
   - [ ] convenient constructor macro?
@@ -119,7 +119,8 @@ shadow CL symbols liberally to accomplish this.
     - [x] tests
   - [x] remove one pair
     - [x] tests
-  - [ ] user-friendly print-object
+  - [x] user-friendly print-object
+    - [ ] print-object for transients?
   - [ ] test that same hash and test functions imply same structure after various operations
     - [x] insertion in random order
     - [ ] removal

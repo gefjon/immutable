@@ -455,18 +455,6 @@ with an error of class `stale-transient'.
 (defun bitmap-contains-p (bitmap logical-index)
   (logbitp logical-index bitmap))
 
-(declaim (ftype (function (hash-node bitmap hash-node-logical-index) (values child-type &optional))
-                hash-node-child-type)
-         ;; Inlining may allow the compiler to eliminate references to and comparisons with the actual
-         ;; keywords in `child-type'.
-         (inline hash-node-child-type))
-(defun hash-node-child-type (hash-node bitmap logical-index)
-  "Does this HASH-NODE contain a child at the index LOGICAL-INDEX?"
-  (cond ((not (bitmap-contains-p bitmap logical-index)) nil)
-        ((bitmap-contains-p (hash-node-child-is-entry-p hash-node) logical-index) :entry)
-        ((bitmap-contains-p (hash-node-child-is-conflict-p hash-node) logical-index) :conflict-node)
-        (:else :hash-node)))
-
 (declaim (ftype (function (bitmap hash-node-logical-index) (values array-index &optional))
                 bitmap-logical-index-to-counted-index)
          ;; Trivial enough that call overhead is meaningful, so always inline.
@@ -478,6 +466,19 @@ Precondition: the associated hash-node must contain the INDEX, i.e. the INDEXth 
   (let* ((bits-before (ldb (byte logical-index 0)
                            bitmap)))
     (logcount bits-before)))
+
+(declaim (ftype (function (hash-node bitmap hash-node-logical-index) (values child-type &optional))
+                hash-node-child-type)
+         ;; Inlining may allow the compiler to eliminate references to and comparisons with the actual
+         ;; keywords in `child-type'.
+         (inline hash-node-child-type))
+(defun hash-node-child-type (hash-node bitmap logical-index)
+  "Does this HASH-NODE contain a child at the index LOGICAL-INDEX?"
+  (when (bitmap-contains-p bitmap logical-index)
+    (let* ((counted-index (bitmap-logical-index-to-counted-index bitmap logical-index)))
+      (cond ((bitmap-contains-p (hash-node-child-is-entry-p hash-node) counted-index) :entry)
+            ((bitmap-contains-p (hash-node-child-is-conflict-p hash-node) counted-index) :conflict-node)
+            (:else :hash-node)))))
 
 (declaim (ftype (function (bitmap hash-node-logical-index) (values array-index &optional))
                 hash-node-key-true-index
@@ -584,7 +585,6 @@ TEST-FUNCTION is the containing `dict' 's TEST-FUNCTION, which must satisfy the 
 the HASH-FUNCTION used to generate HASH.
 
 NOT-FOUND is an arbitrary value to be returned as primary value if NODE does not contain a mapping for KEY."
-  (declare (notinline hash-node-child-type))
   (if-let ((child-type (hash-node-child-type hash-node bitmap logical-index)))
     (multiple-value-bind (subkey value) (hash-node-logical-ref hash-node bitmap logical-index)
       (child-lookup child-type
@@ -598,7 +598,6 @@ NOT-FOUND is an arbitrary value to be returned as primary value if NODE does not
     (values not-found nil)))
 
 (defun child-lookup (child-type entry-key entry-value sought-key hash shift test-function not-found)
-  (declare (notinline extract-hash-part-for-shift bitmap-contains-p))
   (ecase child-type
     ((nil) (values not-found nil))
     (:entry (if (funcall test-function entry-key sought-key)
@@ -702,58 +701,67 @@ nil)."
                                  left-key left-value left-child-type left-idx
                                  right-key right-value right-child-type right-idx
                                  num-added)
-  (let* ((child-is-conflict-p 0)
-         (child-is-entry-p 0))
-    (declare (bitmap child-is-conflict-p child-is-entry-p))
-    (flet ((set-child-type-bits (child-type logical-index)
-             (case child-type
-               (:entry (setf child-is-entry-p
-                             (set-bit child-is-entry-p
-                                      logical-index)))
-               (:conflict-node (setf child-is-conflict-p
-                                     (set-bit child-is-conflict-p
-                                              logical-index))))))
-      (set-child-type-bits left-child-type left-idx)
-      (set-child-type-bits right-child-type right-idx))
-    (values (bitmap-from-indices left-idx right-idx)
+  (multiple-value-bind (lower-key lower-value lower-type lower-idx
+                        higher-key higher-value higher-type higher-idx)
+      (if (< left-idx right-idx)
+          (values left-key left-value left-child-type left-idx
+                  right-key right-value right-child-type right-idx)
+          (values right-key right-value right-child-type right-idx
+                  left-key left-value left-child-type left-idx))
+    (let* ((child-is-conflict-p 0)
+           (child-is-entry-p 0))
+      (declare (bitmap child-is-conflict-p child-is-entry-p))
+      (flet ((set-child-type-bits (child-type counted-index)
+               (case child-type
+                 (:entry (setf child-is-entry-p
+                               (set-bit child-is-entry-p
+                                        counted-index)))
+                 (:conflict-node (setf child-is-conflict-p
+                                       (set-bit child-is-conflict-p
+                                                counted-index))))))
+        (set-child-type-bits lower-type 0)
+        (set-child-type-bits higher-type 1))
+      (let* ((new-node (%make-hash-node :transient-id transient-id
+                                        :child-is-entry-p child-is-entry-p
+                                        :child-is-conflict-p child-is-conflict-p
+                                        :length (logical-count-to-paired-length 2))))
+        (sv-initialize new-node (:start-from +hash-node-zero+)
+          lower-key
+          lower-value
+          higher-key
+          higher-value)
 
-            (let* ((initial-contents (if (< left-idx right-idx)
-                                         (vector left-key left-value right-key right-value)
-                                         (vector right-key right-value left-key left-value))))
-              (declare (dynamic-extent initial-contents))
-              (with-vector-generator (gen-initial-contents initial-contents)
-                (%make-hash-node :transient-id transient-id
-                                 :child-is-entry-p child-is-entry-p
-                                 :child-is-conflict-p child-is-conflict-p
-                                 :length (logical-count-to-paired-length 2)
-                                 :initial-contents gen-initial-contents)))
+        (values (bitmap-from-indices lower-idx higher-idx)
 
-            :hash-node
-            num-added)))
+                new-node
+
+                :hash-node
+
+                num-added)))))
 
 (declaim (ftype (function (transient-id t t child-type hash-node-logical-index t)
                           (values bitmap hash-node (eql :hash-node) t &optional))
                 make-one-entry-hash-node))
 (defun make-one-entry-hash-node (transient-id key value child-type logical-index additional-return-value
-                                 &aux (bitmap (bitmap-from-indices logical-index)))
-  (values bitmap
+                                 &aux )
+  (let* ((bitmap (bitmap-from-indices logical-index))
+         (new-node (%make-hash-node :transient-id transient-id
+                                    :child-is-entry-p (if (eq child-type :entry)
+                                                          1
+                                                          0)
+                                    :child-is-conflict-p (if (eq child-type :conflict-node)
+                                                             1
+                                                             0)
+                                    :length (logical-count-to-paired-length 1))))
+    (sv-initialize new-node (:start-from +hash-node-zero+)
+      key value)
+    (values bitmap
 
-          (let* ((initial-contents (vector key value)))
-            (declare (dynamic-extent initial-contents))
-            (with-vector-generator (gen-initial-contents initial-contents)
-              (%make-hash-node :transient-id transient-id
-                               :child-is-entry-p (if (eq child-type :entry)
-                                                     bitmap
-                                                     0)
-                               :child-is-conflict-p (if (eq child-type :conflict-node)
-                                                        bitmap
-                                                        0)
-                               :length (logical-count-to-paired-length 1)
-                               :initial-contents gen-initial-contents)))
+            new-node
 
-          :hash-node
+            :hash-node
 
-          additional-return-value))
+            additional-return-value)))
 
 (declaim (ftype (function (transient-id fixnum array-length bit &rest t)
                           (values fixnum conflict-node (eql :conflict-node) bit &optional))
@@ -978,16 +986,17 @@ The resulting node will have TRANSIENT-ID installed.
 
 Return four values suitable for the insertion or removal operation:
 (values MY-KEY MY-VALUE MY-TYPE ADDITIONAL-RETURN-VALUE)."
-  (let* ((new-elt-key-true-index (hash-node-key-true-index bitmap logical-index))
+  (let* ((counted-index (bitmap-logical-index-to-counted-index bitmap logical-index))
+         (new-elt-key-true-index (hash-node-key-true-index bitmap logical-index))
          (new-node (%make-hash-node :transient-id transient-id
                                     :child-is-entry-p (bitmap-set-if-same-type-or-unset
                                                        (hash-node-child-is-entry-p hash-node)
                                                        new-type :entry
-                                                       logical-index)
+                                                       counted-index)
                                     :child-is-conflict-p (bitmap-set-if-same-type-or-unset
                                                           (hash-node-child-is-conflict-p hash-node)
                                                           new-type :conflict-node
-                                                          logical-index)
+                                                          counted-index)
                                     :length (hash-node-paired-count hash-node))))
 
     (sv-initialize new-node (:start-from +hash-node-zero+)
@@ -1027,14 +1036,15 @@ Return four values suitable for the insertion or removal operation:
   (set-hash-node-logical-entry bitmap hash-node
                                logical-index
                                new-key new-value)
-  (setf (hash-node-child-is-entry-p hash-node)
-        (bitmap-set-if-same-type-or-unset (hash-node-child-is-entry-p hash-node)
-                                          new-type :entry
-                                          logical-index))
-  (setf (hash-node-child-is-conflict-p hash-node)
-        (bitmap-set-if-same-type-or-unset (hash-node-child-is-conflict-p hash-node)
-                                          new-type :conflict-node
-                                          logical-index))
+  (let* ((counted-index (bitmap-logical-index-to-counted-index bitmap logical-index)))
+    (setf (hash-node-child-is-entry-p hash-node)
+          (bitmap-set-if-same-type-or-unset (hash-node-child-is-entry-p hash-node)
+                                            new-type :entry
+                                            counted-index))
+    (setf (hash-node-child-is-conflict-p hash-node)
+          (bitmap-set-if-same-type-or-unset (hash-node-child-is-conflict-p hash-node)
+                                            new-type :conflict-node
+                                            counted-index)))
   (values bitmap
           hash-node
           :hash-node
@@ -1063,6 +1073,18 @@ Return four values suitable for the insertion or removal operation:
                                  new-key new-value new-type
                                  additional-return-value)))
 
+(declaim (ftype (function (bitmap (mod #.+branch-rate+) bit) (values bitmap &optional))
+                bitmap-splice-at)
+         (inline bitmap-splice-at))
+(defun bitmap-splice-at (bitmap index bit)
+  (let* ((low (ldb (byte index 0) bitmap))
+         (high (ldb (byte (- +branch-rate+ index) index) bitmap)))
+    (dpb high
+         (byte (- 31 index) (1+ index))
+         (dpb bit
+              (byte 1 index)
+              low))))
+
 (declaim (ftype (function (transient-id
                            bitmap hash-node
                            hash-node-logical-index
@@ -1080,16 +1102,15 @@ installed in the new node, potentially allowing future transient operations to m
   (let* ((new-bitmap (set-bit bitmap
                               logical-index))
          (new-paired-length (logical-count-to-paired-length (1+ (hash-node-logical-count hash-node))))
+         (counted-index (bitmap-logical-index-to-counted-index new-bitmap logical-index))
          (new-elt-key-true-index (hash-node-key-true-index new-bitmap logical-index))
          (new-node (%make-hash-node :transient-id transient-id
-                                    :child-is-entry-p (if (eq child-type :entry)
-                                                          (set-bit (hash-node-child-is-entry-p hash-node)
-                                                                   logical-index)
-                                                          (hash-node-child-is-entry-p hash-node))
-                                    :child-is-conflict-p (if (eq child-type :conflict-node)
-                                                             (set-bit (hash-node-child-is-conflict-p hash-node)
-                                                                      logical-index)
-                                                             (hash-node-child-is-conflict-p hash-node))
+                                    :child-is-entry-p (bitmap-splice-at (hash-node-child-is-entry-p hash-node)
+                                                                        counted-index
+                                                                        (if (eq child-type :entry) 1 0))
+                                    :child-is-conflict-p (bitmap-splice-at (hash-node-child-is-conflict-p hash-node)
+                                                                           counted-index
+                                                                           (if (eq child-type :conflict-node) 1 0))
                                     :length new-paired-length)))
 
     (sv-initialize new-node (:start-from +hash-node-zero+)
@@ -1319,6 +1340,19 @@ Precondition: KEY has the same hash as the CONFLICT-NODE."
     ;; If not present, return the conflict-node unchanged.
     (values conflict-hash conflict-node :conflict-node nil)))
 
+(declaim (ftype (function (bitmap (mod #.+branch-rate+)) (values bitmap &optional))
+                bitmap-remove-at)
+         (inline bitmap-remove-at))
+(defun bitmap-remove-at (bitmap index)
+  (let* ((low (ldb (byte index 0) bitmap))
+         (high (ldb (byte (- +branch-rate+ index 1)
+                          (1+ index))
+                    bitmap)))
+    (dpb high
+         (byte (- +branch-rate+ index)
+               index)
+         low)))
+
 (declaim (ftype (function (transient-id bitmap hash-node hash-node-logical-index)
                           (values bitmap hash-node (eql :hash-node) (eql t) &optional))
                 hash-node-remove-at-logical-index))
@@ -1332,12 +1366,11 @@ Precondition: HASH-NODE must `hash-node-contains-p' INDEX-TO-REMOVE, and TRUE-IN
               `hash-node-true-index' of INDEX-TO-REMOVE."
   (let* ((removed-bitmap (unset-bit bitmap
                                     logical-index-to-remove))
-         (removed-child-is-entry-p (unset-bit (hash-node-child-is-entry-p hash-node)
-                                              logical-index-to-remove))
-         ;; TODO: Surely this is only ever called for entry children, not conflict-nodes, right? So this
-         ;;       should be a no-op.
-         (removed-child-is-conflict-p (unset-bit (hash-node-child-is-conflict-p hash-node)
-                                                 logical-index-to-remove))
+         (counted-index-to-remove (bitmap-logical-index-to-counted-index bitmap logical-index-to-remove))
+         (removed-child-is-entry-p (bitmap-remove-at (hash-node-child-is-entry-p hash-node)
+                                                     counted-index-to-remove))
+         (removed-child-is-conflict-p (bitmap-remove-at (hash-node-child-is-conflict-p hash-node)
+                                                        counted-index-to-remove))
          (removed-key-true-index (hash-node-key-true-index bitmap logical-index-to-remove))
          (new-node (%make-hash-node :transient-id transient-id
                                     :child-is-entry-p removed-child-is-entry-p
@@ -1642,3 +1675,134 @@ IMMUTABLE/DICT can only automatically deduce :HASH-FUNCTIONs when the :TEST-FUNC
                 :child-type nil
                 :hash-function hash-function
                 :test-function test-function)))
+
+;;; Internal iteration facility
+
+(declaim (ftype (function ((and vector (not simple-array)))
+                          (values t &optional))
+                stack-peek)
+         ;; Inlining may allow specialization on element-type
+         (inline stack-peek))
+(defun stack-peek (stack)
+  (aref stack (1- (fill-pointer stack))))
+
+(declaim (ftype (function (t (and vector (not simple-array)))
+                          (values t &optional))
+                (setf stack-peek))
+         ;; Inlining may allow specialization on element-type
+         (inline stack-peek))
+(defun (setf stack-peek) (new-value stack)
+  (setf (aref stack (1- (fill-pointer stack)))
+        new-value))
+
+(symbol-macrolet ((body-type (%dict-child-type dict))
+                  (body-key (%dict-key dict))
+                  (body-value (%dict-value dict)))
+  (define-generator dict ((dict dict))
+                    "A generator which yields the (KEY VALUE) pairs of DICT as multiple values.
+
+Entries are yielded in an arbitrary order. Internally, the order will be a stable global total order except
+for hash conflicts, but users should not rely on this behavior."
+      ((node-stack (make-array (1+ +max-shift+)
+                               :fill-pointer 0))
+       (index-stack (make-array (1+ +max-shift+)
+                                :fill-pointer 0
+                                :element-type 'array-index))
+       (leaf-is-conflict-p nil)
+       (startedp nil))
+
+      ()
+    (labels ((push-node (node-type value)
+               (vector-push value node-stack)
+               (ecase node-type
+                 (:conflict-node
+                  (setf leaf-is-conflict-p t)
+                  (vector-push +conflict-node-zero+ index-stack))
+                 (:hash-node
+                  (setf leaf-is-conflict-p nil)
+                  (vector-push +hash-node-zero+ index-stack))))
+
+             (yield-from-stack ()
+               (if (zerop (fill-pointer node-stack))
+                   (done)
+                   (if leaf-is-conflict-p
+                       (yield-from-conflict-node)
+                       (yield-from-hash-node))))
+
+             (yield-from-conflict-node ()
+               (let* ((node (stack-peek node-stack))
+                      (index (stack-peek index-stack)))
+                 (declare (conflict-node node)
+                          (array-index index))
+                 (if (>= index (length node))
+                     (pop-node)
+                     (progn (incf (stack-peek index-stack) 2)
+                            (values (svref node index)
+                                    (svref node (1+ index)))))))
+
+             (yield-from-hash-node ()
+               (let* ((node (stack-peek node-stack))
+                      (index (stack-peek index-stack)))
+                 (declare (array-index index)
+                          (hash-node node))
+                 (if (>= index (length node))
+                     (pop-node)
+                     (let* ((counted-index (ash (- index +hash-node-zero+) -1)))
+                       (incf (stack-peek index-stack) 2)
+                       (cond ((bitmap-contains-p (hash-node-child-is-entry-p node) counted-index)
+                              (values (svref node index)
+                                      (svref node (1+ index))))
+
+                             ((bitmap-contains-p (hash-node-child-is-conflict-p node) counted-index)
+                              (push-node :conflict-node
+                                         (svref node (1+ index)))
+                              (yield-from-stack))
+
+                             (:else
+                              (push-node :hash-node
+                                         (svref node (1+ index)))
+                              (yield-from-stack)))))))
+
+             (pop-node ()
+               (if (<= (fill-pointer node-stack) 1)
+                   (done)
+                   (progn
+                     (vector-pop node-stack)
+                     (vector-pop index-stack)
+                     (yield-from-stack)))))
+      (cond ((null body-type)
+             (done))
+
+            ((eq body-type :entry)
+             (if startedp
+                 (done)
+                 (progn
+                   (setf startedp t)
+                   (values body-key body-value))))
+
+            ((not startedp)
+             (setf startedp t)
+             (push-node body-type body-value)
+             (yield-from-stack))
+
+            (:else (yield-from-stack))))))
+
+;;; printing dicts
+
+(defmethod print-object ((dict dict) stream)
+  (when (and *print-readably* (not *read-eval*))
+    (error "Unable to readably print a DICT when *READ-EVAL* is nil."))
+  ;; FIXME: handle readably printing DICTs with non-default hash and test functions
+  (when *print-readably*
+    (write-string "#." stream))
+  ;; FIXME: haven't actually defined this ctor yet
+  (write-string "(dict" stream)
+  (with-dict-generator (generator dict)
+    (iter (declare (declare-variables))
+      (repeat (size dict))
+      (for (values key value) = (advance generator))
+      (write-char #\space stream)
+      (write key :stream stream)
+      (write-char #\space stream)
+      (write value :stream stream)))
+  (write-char #\) stream))

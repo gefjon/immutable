@@ -1263,25 +1263,23 @@ involve at most +MAX-HEIGHT+ pops, increments, and pushes each time."
       (;; are we in the tail, and what is the next tail element to yield?
        (tail-idx (unless (%vec-body vec) 0))
        ;; the path of nodes we walk to reach the current leaf
-       (node-stack (let* ((stack (make-array (1+ height)
-                                             :fill-pointer 0)))
-                     (vector-push body stack)
-                     (iter (declare (declare-variables))
-                       (repeat height)
-                       (vector-push (svref (stack-peek stack) 0) stack))
-                     stack))
+       (node-stack (make-array (1+ height)
+                               :fill-pointer 0))
        ;; the path of indices into those nodes we walk to reach the next element. for
        ;; all I < Height, (svref (aref NODE-STACK I) (aref INDEX-STACK I)) = (aref
        ;; NODE-STACK (1+ I)), i.e. the INDEX-STACK holds the index of the node we are
        ;; currently traversing. for I = HEIGHT, the INDEX-STACK holds the index of the
        ;; next element to yield.
-       (index-stack (let* ((stack (make-array (1+ height)
-                                              :fill-pointer 0
-                                              :element-type 'node-index)))
-                      (iter (declare (declare-variables))
-                        (repeat (1+ height))
-                        (vector-push 0 stack))
-                      stack)))
+       (index-stack (make-array (1+ height)
+                                :fill-pointer 0
+                                :element-type 'node-index)))
+
+      ((vector-push body node-stack)
+        (vector-push 0 index-stack)
+        (iter (declare (declare-variables))
+          (repeat height)
+          (vector-push (svref (stack-peek node-stack) 0) node-stack)
+          (vector-push 0 index-stack)))
 
     (declare ((or null tail-length) tail-idx))
     (labels ((generate-from-tail ()
