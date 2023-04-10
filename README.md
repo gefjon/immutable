@@ -114,7 +114,7 @@ shadow CL symbols liberally to accomplish this.
   - [x] internal iteration facility
   - [ ] convert from CL collections - `from-hash-table`, `from-alist`?
   - [ ] convert to CL collections - `to-hash-table`, `to-alist`?
-  - [ ] convenient constructor macro?
+  - [x] convenient constructor - `dict`
   - [x] insert one pair
     - [x] tests
   - [x] remove one pair
@@ -125,8 +125,10 @@ shadow CL symbols liberally to accomplish this.
     - [x] insertion in random order
     - [ ] removal
     - [ ] replacement
-  - [ ] insert multiple pairs?
-  - [ ] remove multiple pairs?
+  - [x] insert multiple pairs - `insert-multiple`
+    - [ ] tests
+  - [x] remove multiple pairs - `remove-multiple`
+    - [ ] tests
   - [ ] combine two (or more?) maps - `union`
     - [ ] check for compatible hash and equality functions
       - [ ] solve equality testing on arbitrary closures /s

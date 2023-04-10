@@ -48,7 +48,13 @@
    #:remove #:remove!
 
    ;; MAKE-HASH-TABLE analogue to construct an empty dict
-   #:empty))
+   #:empty
+
+   ;; Batched insertions and removals
+   #:insert-plist
+   #:insert-alist
+   #:insert-multiple
+   #:remove-multiple))
 (in-package :immutable/dict)
 
 #+immutable-dict-debug
@@ -1806,3 +1812,117 @@ for hash conflicts, but users should not rely on this behavior."
       (write-char #\space stream)
       (write value :stream stream)))
   (write-char #\) stream))
+
+;;; batched insert operations
+
+(define-condition malformed-plist (error)
+  ((%operation :initarg :operation
+               :accessor malformed-plist-operation)
+   (%plist :initarg :plist
+           :accessor malformed-plist-plist))
+  (:report (lambda (c s)
+             (format s "Malformed plist in ~s:~%  ~s"
+                     (malformed-plist-operation c)
+                     (malformed-plist-plist c)))))
+
+(define-condition malformed-alist (error)
+  ((%operation :initarg :operation
+               :accessor malformed-alist-operation)
+   (%alist :initarg :alist
+           :accessor malformed-alist-alist))
+  (:report (lambda (c s)
+             (format s "Malformed alist in ~s:~%  ~s"
+                     (malformed-alist-operation c)
+                     (malformed-alist-alist c)))))
+
+(declaim (ftype (function (dict list) (values dict &optional))
+                insert-alist
+                insert-plist))
+(defun insert-plist (dict plist)
+  "Return a new `dict' like DICT, but containing all the mappings from PLIST.
+
+PLIST must be a proper list with an even-numbered length. Its entries will be treated as alternating keys and
+values.
+
+Entries from the PLIST will overwrite entries in DICT, and later entries in PLIST will overwrite earlier
+entries."
+  (if (null plist)
+      dict
+      (let* ((transient (transient dict)))
+        (labels ((insert-pair (list)
+                   (if (not (and (consp list)
+                                 (consp (rest list))))
+                       (error 'malformed-plist
+                              :plist plist
+                              :operation 'insert-plist)
+                       (destructuring-bind (key value &rest tail) list
+                         (insert! transient key value)
+                         (when tail (insert-pair tail))))))
+          (insert-pair plist))
+        (persistent! transient))))
+
+(defun insert-alist (dict alist)
+  "Return a new `dict' like DICT, but containing all the mappings from ALIST.
+
+ALIST must be a proper list whose elements are all conses. Each cons will be destructured as (KEY . VALUE).
+
+Entries from the ALIST will overwrite entries in DICT, and later entries in ALIST will overwrite earlier
+entries."
+  (if (null alist)
+      dict
+      (let* ((transient (transient dict)))
+        (labels ((insert-pair (list)
+                   (destructuring-bind (entry &rest tail) list
+                     (if (not (and (consp entry)
+                                   (listp tail)))
+                         (error 'malformed-alist
+                                :alist alist
+                                :operation 'insert-alist)
+                         (progn
+                           (insert! transient (car entry) (cdr entry))
+                           (when tail (insert-pair tail)))))))
+          (insert-pair alist))
+        (persistent! transient))))
+
+(declaim (ftype (function (dict &rest t) (values dict &optional))
+                insert-multiple))
+(defun insert-multiple (dict &rest keys-and-values)
+  "Return a new `dict' like DICT, but containing all the mappings specified by KEYS-AND-VALUES.
+
+There must be an even number of KEYS-AND-VALUES. They will be treated as alternating keys and values.
+
+Entries from the KEYS-AND-VALUES will overwrite entries in DICT, and later entries in KEYS-AND-VALUES will
+overwrite earlier entries."
+  (declare (dynamic-extent keys-and-values))
+  (insert-plist dict keys-and-values))
+
+(declaim (ftype (function (dict &rest t) (values dict &optional))
+                remove-multiple))
+(defun remove-multiple (dict &rest keys)
+  "Return a new `dict' like DICT, but with the entries corresponding to each of the KEYS removed.
+
+Any of the KEYS which are not present in DICT will be silently ignored."
+  (declare (dynamic-extent keys))
+  (if (null keys)
+      dict
+      (let* ((transient (transient dict)))
+        (labels ((remove-one (list)
+                   (destructuring-bind (key &rest tail) list
+                     (remove! transient key)
+                     (when tail
+                       (remove-one tail)))))
+          (remove-one keys))
+        (persistent! transient))))
+
+;;; convenient constructor
+
+(declaim (ftype (function (&rest t) (values dict &optional))
+                dict))
+(defun dict (&rest keys-and-values)
+  "Construct a `dict' containing all the mappings specified by KEYS-AND-VALUES.
+
+There must be an even number of KEYS-AND-VALUES. They will be treated as alternating keys and values.
+
+If the same key appears multiple times in KEYS-AND-VALUES, later values will overwrite earlier values."
+  (declare (dynamic-extent keys-and-values))
+  (insert-plist (empty) keys-and-values))

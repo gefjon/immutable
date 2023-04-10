@@ -350,3 +350,33 @@
         (is (eql i (dict:get dict i)))
         (is (eql (1+ i) (dict:get persistent i)))
         (is (eql (1+ i) (dict:get transient i)))))))
+
+(def-test simple-constructor (:suite immutable-dict-suite)
+  (let* ((dict (dict:dict :zero 0 :one 1 :two 2 :three 3)))
+    (is-dict-valid dict)
+    (is (eql 0 (dict:get dict :zero)))
+    (is (eql 1 (dict:get dict :one)))
+    (is (eql 2 (dict:get dict :two)))
+    (is (eql 3 (dict:get dict :three)))
+
+    (is-false (dict:get dict :four))
+
+    (is-false (dict:get dict 0))
+    (is-false (dict:get dict 1))
+    (is-false (dict:get dict 2))
+    (is-false (dict:get dict 3))
+
+    (is-false (dict:get dict "zero"))
+    (is-false (dict:get dict "one"))
+    (is-false (dict:get dict "two"))
+    (is-false (dict:get dict "three"))
+
+    (is-false (dict:get dict :|zero|))
+    (is-false (dict:get dict :|one|))
+    (is-false (dict:get dict :|two|))
+    (is-false (dict:get dict :|three|))
+
+    (is-false (dict:get dict "ZERO"))
+    (is-false (dict:get dict "ONE"))
+    (is-false (dict:get dict "TWO"))
+    (is-false (dict:get dict "THREE"))))
