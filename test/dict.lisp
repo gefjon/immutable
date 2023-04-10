@@ -346,3 +346,49 @@
         (is (eql i (dict:get dict i)))
         (is (eql (1+ i) (dict:get persistent i)))
         (is (eql (1+ i) (dict:get transient i)))))))
+
+(def-test merge-function-old-value (:suite immutable-dict-suite)
+  (let* ((old '#:old)
+         (new '#:new))
+    (flet ((is-behavior-sane (test-function)
+           (let* ((dict (quietly (iter (with partial-dict = (dict:empty :test-function test-function))
+                                   (for i below 128)
+                                   (for inserted = (dict:insert partial-dict
+                                                                i
+                                                                old
+                                                                (lambda (k o n)
+                                                                  (fail "Unexpectedly called MERGE-FUNCTION.
+
+Called with:
+  KEY       = ~a
+  OLD-VALUE = ~a
+  NEW-VALUE = ~a
+
+In iteration:
+  I            = ~d
+  PARTIAL-DICT = ~s"
+                                                                        k o n i partial-dict))))
+                                   (is (= (1+ i) (dict:size inserted)))
+                                   (is (not (eq partial-dict inserted)))
+                                   (setf partial-dict inserted)
+                                   (finally (return partial-dict))))))
+             (is-dict-valid dict)
+             (quietly
+               (iter (for i below 128)
+                 (is (eq old (dict:get dict i "")))))
+             (let* ((replaced (quietly
+                                (iter (with partial-dict = dict)
+                                  (for i below 128)
+                                  (for replaced = (dict:insert partial-dict i new #'dict:old-value))
+                                  (is (not (eq partial-dict replaced)))
+                                  (setf partial-dict replaced)
+                                  (finally (return replaced))))))
+               (is-dict-valid replaced)
+               (are-structures-same dict replaced)
+               (quietly
+                 (iter (declare (declare-variables))
+                   (for i below 128)
+                   (is (eq old
+                           (dict:get replaced i)))))))))
+    (is-behavior-sane 'hash:==)
+    (is-behavior-sane 'equal))))
