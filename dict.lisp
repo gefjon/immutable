@@ -15,7 +15,7 @@
   (:import-from #:immutable/%atomic
                 #:define-atomic-counter
                 #:increment-atomic-counter)
-  (:shadow #:get #:remove)
+  (:shadow #:get #:remove #:do)
   (:use :cl :iterate :immutable/%generator :immutable/%simple-vector-utils)
   (:import-from :immutable/hash
                 #:==
@@ -54,7 +54,12 @@
    #:insert-plist
    #:insert-alist
    #:insert-multiple
-   #:remove-multiple))
+   #:remove-multiple
+
+   ;; Iteration over dicts
+   #:for-each
+   #:map-values
+   #:do))
 (in-package :immutable/dict)
 
 #+immutable-dict-debug
@@ -1707,8 +1712,10 @@ IMMUTABLE/DICT can only automatically deduce :HASH-FUNCTIONs when the :TEST-FUNC
   (define-generator dict ((dict dict))
                     "A generator which yields the (KEY VALUE) pairs of DICT as multiple values.
 
-Entries are yielded in an arbitrary order. Internally, the order will be a stable global total order except
-for hash conflicts, but users should not rely on this behavior."
+Entries are yielded in an arbitrary order. Internally, entries will be sorted by hash from low to high (well,
+actually by the unsigned integer with the same two's complement representation as the signed hash from low to
+high), so with a stable hash function the order will be a stable global total order except for hash conflicts,
+but users should not rely on this behavior."
       ((node-stack (make-array (1+ +max-shift+)
                                :fill-pointer 0))
        (index-stack (make-array (1+ +max-shift+)
@@ -1742,7 +1749,9 @@ for hash conflicts, but users should not rely on this behavior."
                           (array-index index))
                  (if (>= index (length node))
                      (pop-node)
-                     (progn (incf (stack-peek index-stack) 2)
+                     ;; declaring THE ARRAY-INDEX here allows SBCL 2.3.2 darwin-arm64 to elide a branch which
+                     ;; would allocate a bignum on overflow - pgoldman 2023-04-11.
+                     (progn (incf (the array-index (stack-peek index-stack)) 2)
                             (values (svref node index)
                                     (svref node (1+ index)))))))
 
@@ -1754,7 +1763,9 @@ for hash conflicts, but users should not rely on this behavior."
                  (if (>= index (length node))
                      (pop-node)
                      (let* ((counted-index (ash (- index +hash-node-zero+) -1)))
-                       (incf (stack-peek index-stack) 2)
+                       ;; declaring THE ARRAY-INDEX here allows SBCL 2.3.2 darwin-arm64 to elide a branch which
+                       ;; would allocate a bignum on overflow - pgoldman 2023-04-11.
+                       (incf (the array-index (stack-peek index-stack)) 2)
                        (cond ((bitmap-contains-p (hash-node-child-is-entry-p node) counted-index)
                               (values (svref node index)
                                       (svref node (1+ index))))
@@ -1926,3 +1937,88 @@ There must be an even number of KEYS-AND-VALUES. They will be treated as alterna
 If the same key appears multiple times in KEYS-AND-VALUES, later values will overwrite earlier values."
   (declare (dynamic-extent keys-and-values))
   (insert-plist (empty) keys-and-values))
+
+;;; user-facing iteration
+
+(declaim (ftype (function (dict (function (t t) (values &rest t))) (values &optional))
+                for-each))
+(defun for-each (dict func)
+  "Apply FUNC to each (KEY VALUE) entry in DICT, discarding the results.
+
+FUNC should be a function of two arguments, the KEY and VALUE.
+
+Entries in DICT are traversed in an undefined order. You can count on FUNC being invoked exactly (size DICT)
+times, once for each entry in DICT, but that's where the guarantees end."
+  (with-dict-generator (generator dict)
+    (iter (declare (declare-variables))
+      (repeat (size dict))
+      (multiple-value-call func (advance generator))))
+  (values))
+
+(declaim (ftype (function (dict (function (t) (values t &rest t)))
+                          (values dict &optional))
+                map-values))
+(defun map-values (dict func)
+  "Apply FUNC to each VALUE in DICT, and collect the result into a new `dict' which, for each (KEY VALUE) entry in DICT, maps KEY to (func VALUE).
+
+FUNC should be a function of one argument, a VALUE. The associated KEYs are not passed to FUNC.
+
+For users with strongly-typed backgrounds, this is the operation which implements `Functor' for (Dict :KEY).
+
+This operation runs in O(N log_{+branch_rate+}N) in the size of DICT (assuming FUNC runs in constant time),
+and does not allocate except to construct the nodes that will be in the resulting `dict'. This is a notable
+contrast to implementing the same interface in terms of `for-each', `empty' and `insert', which would
+unnecessarily allocate temporary nodes during insertion."
+  (labels ((map-entry (value)
+             (funcall func value))
+           (map-conflict-node (conflict-node)
+             (let* ((new-node (%make-conflict-node :length (conflict-node-paired-count conflict-node))))
+               (iter (declare (declare-variables))
+                 (for logical-index below (conflict-node-logical-length conflict-node))
+                 (for (key value) = (conflict-node-logical-ref conflict-node logical-index))
+                 (for new-value = (map-entry value))
+                 (set-conflict-node-logical-entry conflict-node logical-index key new-value))
+                new-node))
+           (map-hash-node (hash-node)
+             (let* ((new-node (%make-hash-node :child-is-entry-p (hash-node-child-is-entry-p hash-node)
+                                               :child-is-conflict-p (hash-node-child-is-conflict-p hash-node)
+                                               :length (hash-node-paired-count hash-node))))
+               (iter (declare (declare-variables))
+                 (for counted-index below (hash-node-logical-count hash-node))
+                 (for true-index = (hash-node-paired-index-to-true-index (ash counted-index 1)))
+                 (for key = (hash-node-true-ref hash-node true-index))
+                 (for value = (hash-node-true-ref hash-node (1+ true-index)))
+                 (for new-value = (cond ((bitmap-contains-p (hash-node-child-is-entry-p hash-node) counted-index)
+                                         (map-entry value))
+
+                                        ((bitmap-contains-p (hash-node-child-is-conflict-p hash-node) counted-index)
+                                         (map-conflict-node value))
+
+                                        (:else
+                                         (map-hash-node value))))
+                 (setf (hash-node-true-ref new-node true-index)
+                       key)
+                 (setf (hash-node-true-ref new-node (1+ true-index))
+                       new-value))
+               new-node)))
+    (%make-dict :size (size dict)
+                :hash-function (hash-function dict)
+                :test-function (test-function dict)
+                :child-type (%dict-child-type dict)
+                :key (%dict-key dict)
+                :value (ecase (%dict-child-type dict)
+                         ((null) nil)
+                         (:entry (map-entry (%dict-value dict)))
+                         (:conflict-node (map-conflict-node (%dict-value dict)))
+                         (:hash-node (map-hash-node (%dict-value dict)))))))
+
+(defmacro do ((key-binding value-binding dict) &body body)
+  "Evaluate the BODY for each entry of DICT with KEY-BINDING and VALUE-BINDING bound to the KEY and VALUE of the entry, respectively.
+
+Returns no values.
+
+This is a convenience macro which expands to a `for-each' call. All notes on `for-each' apply."
+  `(flet ((do-function (,key-binding ,value-binding)
+            ,@body))
+     (declare (dynamic-extent #'do-function))
+     (for-each ,dict #'do-function)))

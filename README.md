@@ -137,9 +137,9 @@ shadow CL symbols liberally to accomplish this.
     - [ ] accept a `merge-entries` function of type `(function (key &rest value) (values
           value &optional))` to avoid left- or right-bias
   - [ ] convenient iteration constructs
-    - [ ] `map-values` - apply function to each value, leaving keys untouched, collect to new `dict`
-    - [ ] `for-each` - apply function to each pair, discard result
-    - [ ] `do` - macro analogous to `dolist`
+    - [x] `map-values` - apply function to each value, leaving keys untouched, collect to new `dict`
+    - [x] `for-each` - apply function to each pair, discard result
+    - [x] `do` - macro analogous to `dolist`
     - [ ] `iterate` integration?
   - [ ] equality testing
   - [ ] change hash and test function of `dict` - `rehash`
