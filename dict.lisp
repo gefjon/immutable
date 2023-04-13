@@ -44,6 +44,9 @@
    ;; (SETF GETHASH) analogue
    #:insert #:insert!
 
+   ;; Specifying the behavior of insertion when a dict already contains a mapping for the given key
+   #:merge-function #:new-value #:old-value
+
    ;; REMHASH analogue
    #:remove #:remove!
 
@@ -660,6 +663,27 @@ nil)."
 ;; NUM-ADDED-ELEMENTS), where the KEY is a thing that goes in the key-index of its parent, and the VALUE is a
 ;; thing that goes in the value-index of its parent.
 
+(deftype merge-function (&optional (key t) (value t))
+  "A function used to compute the resulting value in an `insert' operation when the key is already present.
+
+During (insert DICT KEY NEW-VALUE), if DICT already associates KEY with OLD-VALUE, the `merge-function' will
+be called with (KEY OLD-VALUE NEW-VALUE).
+
+The default `merge-function' is `new-value', which ignores the KEY and OLD-VALUE and uses the NEW-VALUE."
+  `(function (,key ,value ,value) (values ,value &optional)))
+
+(declaim (ftype merge-function
+                new-value
+                old-value))
+(defun new-value (key old-value new-value)
+  "The default `merge-function', which inserts the NEW-VALUE, overwriting the OLD-VALUE."
+  (declare (ignore key old-value))
+  new-value)
+(defun old-value (key old-value new-value)
+  "A `merge-function' which leaves the OLD-VALUE, effectively aborting the `insert' operation."
+  (declare (ignore key new-value))
+  old-value)
+
 (declaim (ftype (function (hash-node-logical-index)
                           (values bitmap &optional))
                 bit-from-index)
@@ -829,14 +853,18 @@ Precondition: (/= LEFT-HASH RIGHT-HASH), or else we would construct a unified `c
                                   right-key right-value right-child-type right-index
                                   num-added))))
 
-(declaim (ftype (function (transient-id t t t t fixnum shift test-function hash-function)
+(declaim (ftype (function (transient-id t t t t fixnum shift test-function hash-function merge-function)
                           (values t t child-type bit &optional))
                 insert-alongside-entry))
-(defun insert-alongside-entry (transient-id neighbor-key neighbor-value key value hash shift test-function hash-function
+(defun insert-alongside-entry (transient-id
+                               neighbor-key neighbor-value
+                               key value
+                               hash shift
+                               test-function hash-function merge-function
                                &aux (neighbor-hash (funcall hash-function neighbor-key)))
   (cond ((and (= neighbor-hash hash)
               (funcall test-function neighbor-key key))
-         (values key value :entry 0))
+         (values key (funcall merge-function key neighbor-value value) :entry 0))
 
         ((= neighbor-hash hash)
          (make-conflict-node transient-id hash 2 1 neighbor-key neighbor-value key value))
@@ -938,10 +966,14 @@ Precondition: NEW-ENTRY has the same hash as CONFLICT-NODE, and no existing entr
             :conflict-node
             1)))
 
-(declaim (ftype (function (transient-id fixnum conflict-node t t fixnum shift test-function)
+(declaim (ftype (function (transient-id fixnum conflict-node t t fixnum shift test-function merge-function)
                           (values t t child-type bit &optional))
                 insert-into-conflict-node))
-(defun insert-into-conflict-node (transient-id conflict-hash conflict-node new-key new-value hash shift test-function)
+(defun insert-into-conflict-node (transient-id
+                                  conflict-hash conflict-node
+                                  new-key new-value
+                                  hash shift
+                                  test-function merge-function)
   "Add a new entry (KEY -> VALUE) to or alongside CONFLICT-NODE.
 
 Depending on whether HASH is the same as the hash in CONFLICT-NODE, this may allocate a new `hash-node' to
@@ -955,7 +987,9 @@ instead of allocating a new node. If a new node is allocated, the TRANSIENT-ID w
     (cond ((and same-hash-p logical-index)
            ;; If CONFLICT-NODE already contains a mapping for KEY, replace it. This is the case where we can
            ;; mutate if the transient ids match.
-           (conflict-node-replace-at-logical-index transient-id conflict-node hash new-key new-value logical-index))
+           (let* ((old-value (conflict-node-logical-value-ref conflict-node logical-index))
+                  (merged-value (funcall merge-function new-key old-value new-value)))
+             (conflict-node-replace-at-logical-index transient-id conflict-node hash new-key merged-value logical-index)))
 
           (same-hash-p
            ;; If the new mapping conflicts with CONFLICT-NODE but is not already present, add it. This will
@@ -1142,7 +1176,7 @@ installed in the new node, potentially allowing future transient operations to m
             1)))
 
 ;; predeclaration for type inference on recursive calls by `insert-into-hash-node'
-(declaim (ftype (function (transient-id child-type t t t t fixnum shift test-function hash-function)
+(declaim (ftype (function (transient-id child-type t t t t fixnum shift test-function hash-function merge-function)
                           (values t t child-type bit &optional))
                 node-insert))
 
@@ -1150,7 +1184,7 @@ installed in the new node, potentially allowing future transient operations to m
                            bitmap hash-node
                            t t fixnum
                            shift
-                           test-function hash-function)
+                           test-function hash-function merge-function)
                           (values bitmap hash-node (eql :hash-node) bit &optional))
                 insert-into-hash-node))
 (defun insert-into-hash-node (transient-id
@@ -1158,7 +1192,8 @@ installed in the new node, potentially allowing future transient operations to m
                               key value hash
                               shift
                               test-function
-                              hash-function)
+                              hash-function
+                              merge-function)
   "Add a new entry (KEY -> VALUE) as a child of HASH-NODE.
 
 If TRANSIENT-ID matches the id of the HASH-NODE, this operation may mutate HASH-NODE and return it rather than
@@ -1174,7 +1209,8 @@ allocating a new node. If a new node is allocated, the TRANSIENT-ID will be inst
                          child-type
                          child-key child-value
                          key value hash
-                         (1+ shift) test-function hash-function)
+                         (1+ shift)
+                         test-function hash-function merge-function)
           ;; This operation may, depending on transient-ness and ownership, mutate the HASH-NODE rather than
           ;; copying.
           (hash-node-replace-at transient-id
@@ -1195,7 +1231,7 @@ allocating a new node. If a new node is allocated, the TRANSIENT-ID will be inst
                     key value
                     hash
                     shift
-                    test-function hash-function)
+                    test-function hash-function merge-function)
   "Make KEY map to VALUE within NODE.
 
 Returns a new node like NODE, but with the mapping (KEY -> VALUE). If KEY is already associated with a value
@@ -1217,28 +1253,31 @@ will have the TRANSIENT-ID installed as their id."
                                     body-key body-value
                                     key value hash
                                     shift
-                                    test-function hash-function))
+                                    test-function hash-function merge-function))
     (:conflict-node (insert-into-conflict-node transient-id
                                                body-key body-value
                                                key value
                                                hash
                                                shift
-                                               test-function))
+                                               test-function merge-function))
     (:hash-node
      (insert-into-hash-node transient-id
                             body-key body-value
                             key value
                             hash
                             shift
-                            test-function hash-function))))
+                            test-function hash-function merge-function))))
 
-(declaim (ftype (function (dict t t) (values dict &optional))
+(declaim (ftype (function (dict t t &optional merge-function) (values dict &optional))
                 insert))
-(defun insert (dict key value)
+(defun insert (dict key value &optional (merge-function #'new-value))
   "Associate KEY with VALUE in DICT.
 
-Returns a new `dict' like DICT, with KEY mapping to VALUE. If DICT already contains a mapping for KEY, the old
-mapping is replaced."
+Returns a new `dict' like DICT, with KEY mapping to VALUE.
+
+The MERGE-FUNCTION defines the behavior if DICT already contains a mapping for KEY. It is a function of three
+arguments, (KEY OLD-VALUE NEW-VALUE), which returns a MERGED-VALUE. The default is `new-value', which returns
+the NEW-VALUE as the MERGED-VALUE, effectively overwriting the OLD-VALUE in the resulting `dict'."
   (with-accessors ((hash-function %dict-hash-function)
                    (test-function %dict-test-function)
                    (body-key %dict-key)
@@ -1248,7 +1287,7 @@ mapping is replaced."
       dict
     (let* ((hash (funcall hash-function key)))
       (multiple-value-bind (new-body-key new-body-value new-type added-count)
-          (node-insert nil body-type body-key body-value key value hash 0 test-function hash-function)
+          (node-insert nil body-type body-key body-value key value hash 0 test-function hash-function merge-function)
         (%make-dict :size (+ size added-count)
                     :hash-function hash-function
                     :test-function test-function
@@ -1256,14 +1295,18 @@ mapping is replaced."
                     :value new-body-value
                     :child-type new-type)))))
 
-(declaim (ftype (function (transient t t) (values transient &optional))
+(declaim (ftype (function (transient t t &optional merge-function) (values transient &optional))
                 insert!))
-(defun insert! (transient key value)
+(defun insert! (transient key value &optional (merge-function #'new-value))
   "Associate KEY with VALUE in TRANSIENT.
 
 This operation will avoid consing by mutating uniquely owned substructures of TRANSIENT when possible.
 
-The return value will always be `eq' to TRANSIENT."
+The return value will always be `eq' to TRANSIENT.
+
+The MERGE-FUNCTION defines the behavior if DICT already contains a mapping for KEY. It is a function of three
+arguments, (KEY OLD-VALUE NEW-VALUE), which returns a MERGED-VALUE. The default is `new-value', which returns
+the NEW-VALUE as the MERGED-VALUE, effectively overwriting the OLD-VALUE in the resulting `dict'."
   (with-accessors ((hash-function %transient-hash-function)
                    (test-function %transient-test-function)
                    (body-key %transient-key)
@@ -1278,7 +1321,7 @@ The return value will always be `eq' to TRANSIENT."
                :transient transient)
         (let* ((hash (funcall hash-function key)))
           (multiple-value-bind (new-body-key new-body-value new-type added-count)
-              (node-insert id body-type body-key body-value key value hash 0 test-function hash-function)
+              (node-insert id body-type body-key body-value key value hash 0 test-function hash-function merge-function)
             (setf body-key new-body-key)
             (setf body-value new-body-value)
             (setf body-type new-type)
@@ -1846,17 +1889,20 @@ but users should not rely on this behavior."
                      (malformed-alist-operation c)
                      (malformed-alist-alist c)))))
 
-(declaim (ftype (function (dict list) (values dict &optional))
+(declaim (ftype (function (dict list &optional merge-function) (values dict &optional))
                 insert-alist
                 insert-plist))
-(defun insert-plist (dict plist)
+(defun insert-plist (dict plist &optional (merge-function #'new-value))
   "Return a new `dict' like DICT, but containing all the mappings from PLIST.
 
 PLIST must be a proper list with an even-numbered length. Its entries will be treated as alternating keys and
 values.
 
-Entries from the PLIST will overwrite entries in DICT, and later entries in PLIST will overwrite earlier
-entries."
+The MERGE-FUNCTION defines the behavior if DICT already contains a mapping for KEY. It is a function of three
+arguments, (KEY OLD-VALUE NEW-VALUE), which returns a MERGED-VALUE. If the PLIST contains multiple entries for
+the same key, the MERGE-FUNCTION will be invoked repeatedly, in a manner similar to `reduce', with the
+previous MERGED-VALUE becoming the next OLD-VALUE. The default is `new-value', which returns the NEW-VALUE as
+the MERGED-VALUE, effectively overwriting the OLD-VALUE in the resulting `dict'."
   (if (null plist)
       dict
       (let* ((transient (transient dict)))
@@ -1867,18 +1913,21 @@ entries."
                               :plist plist
                               :operation 'insert-plist)
                        (destructuring-bind (key value &rest tail) list
-                         (insert! transient key value)
+                         (insert! transient key value merge-function)
                          (when tail (insert-pair tail))))))
           (insert-pair plist))
         (persistent! transient))))
 
-(defun insert-alist (dict alist)
+(defun insert-alist (dict alist &optional (merge-function #'new-value))
   "Return a new `dict' like DICT, but containing all the mappings from ALIST.
 
 ALIST must be a proper list whose elements are all conses. Each cons will be destructured as (KEY . VALUE).
 
-Entries from the ALIST will overwrite entries in DICT, and later entries in ALIST will overwrite earlier
-entries."
+The MERGE-FUNCTION defines the behavior if DICT already contains a mapping for KEY. It is a function of three
+arguments, (KEY OLD-VALUE NEW-VALUE), which returns a MERGED-VALUE. If the ALIST contains multiple entries for
+the same key, the MERGE-FUNCTION will be invoked repeatedly, in a manner similar to `reduce', with the
+previous MERGED-VALUE becoming the next OLD-VALUE. The default is `new-value', which returns the NEW-VALUE as
+the MERGED-VALUE, effectively overwriting the OLD-VALUE in the resulting `dict'."
   (if (null alist)
       dict
       (let* ((transient (transient dict)))
@@ -1890,7 +1939,7 @@ entries."
                                 :alist alist
                                 :operation 'insert-alist)
                          (progn
-                           (insert! transient (car entry) (cdr entry))
+                           (insert! transient (car entry) (cdr entry) merge-function)
                            (when tail (insert-pair tail)))))))
           (insert-pair alist))
         (persistent! transient))))
@@ -1903,7 +1952,10 @@ entries."
 There must be an even number of KEYS-AND-VALUES. They will be treated as alternating keys and values.
 
 Entries from the KEYS-AND-VALUES will overwrite entries in DICT, and later entries in KEYS-AND-VALUES will
-overwrite earlier entries."
+overwrite earlier entries.
+
+`insert-multiple' does not support supplying a `merge-function'. If you want to supply a `merge-function',
+construct a `transient' and repeatedly call `insert!'."
   (declare (dynamic-extent keys-and-values))
   (insert-plist dict keys-and-values))
 
