@@ -126,9 +126,9 @@ shadow CL symbols liberally to accomplish this.
     - [ ] removal
     - [ ] replacement
   - [x] insert multiple pairs - `insert-multiple`
-    - [ ] tests
+    - [x] tests
   - [x] remove multiple pairs - `remove-multiple`
-    - [ ] tests
+    - [x] tests
   - [ ] combine two (or more?) maps - `union`
     - [ ] check for compatible hash and equality functions
       - [ ] solve equality testing on arbitrary closures /s
