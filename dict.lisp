@@ -15,7 +15,7 @@
   (:import-from #:immutable/%atomic
                 #:define-atomic-counter
                 #:increment-atomic-counter)
-  (:shadow #:get #:remove #:do)
+  (:shadow #:get #:remove #:do #:union)
   (:use :cl :iterate :immutable/%generator :immutable/%simple-vector-utils)
   (:import-from :immutable/hash
                 #:==
@@ -62,7 +62,10 @@
    ;; Iteration over dicts
    #:for-each
    #:map-values
-   #:do))
+   #:do
+
+   ;; Combining dicts
+   #:union))
 (in-package :immutable/dict)
 
 #+immutable-dict-debug
@@ -729,13 +732,13 @@ The default `merge-function' is `new-value', which ignores the KEY and OLD-VALUE
 (declaim (ftype (function (transient-id
                            t t child-type hash-node-logical-index
                            t t child-type hash-node-logical-index
-                           bit)
-                          (values bitmap hash-node (eql :hash-node) bit &optional))
+                           t)
+                          (values bitmap hash-node (eql :hash-node) t &optional))
                 make-two-entry-hash-node))
 (defun make-two-entry-hash-node (transient-id
                                  left-key left-value left-child-type left-idx
                                  right-key right-value right-child-type right-idx
-                                 num-added)
+                                 additional-return-value)
   (multiple-value-bind (lower-key lower-value lower-type lower-idx
                         higher-key higher-value higher-type higher-idx)
       (if (< left-idx right-idx)
@@ -772,7 +775,7 @@ The default `merge-function' is `new-value', which ignores the KEY and OLD-VALUE
 
                 :hash-node
 
-                num-added)))))
+                additional-return-value)))))
 
 (declaim (ftype (function (transient-id t t child-type hash-node-logical-index t)
                           (values bitmap hash-node (eql :hash-node) t &optional))
@@ -798,10 +801,10 @@ The default `merge-function' is `new-value', which ignores the KEY and OLD-VALUE
 
             additional-return-value)))
 
-(declaim (ftype (function (transient-id fixnum array-length bit &rest t)
-                          (values fixnum conflict-node (eql :conflict-node) bit &optional))
+(declaim (ftype (function (transient-id fixnum array-length t &rest t)
+                          (values fixnum conflict-node (eql :conflict-node) t &optional))
                 make-conflict-node))
-(defun make-conflict-node (transient-id hash logical-count num-added &rest keys-and-values)
+(defun make-conflict-node (transient-id hash logical-count additional-return-value &rest keys-and-values)
   (declare (dynamic-extent keys-and-values))
   (values
    hash
@@ -813,20 +816,20 @@ The default `merge-function' is `new-value', which ignores the KEY and OLD-VALUE
 
    :conflict-node
 
-   num-added))
+   additional-return-value))
 
 (declaim (ftype (function (transient-id
                            t t fixnum child-type
                            t t fixnum child-type
                            shift
-                           bit)
-                          (values bitmap hash-node (eql :hash-node) bit &optional))
+                           t)
+                          (values bitmap hash-node (eql :hash-node) t &optional))
                 promote-node))
 (defun promote-node (transient-id
                      left-key left-value left-hash left-child-type
                      right-key right-value right-hash right-child-type
                      shift
-                     num-added)
+                     additional-return-value)
   "Combine the LEFT-NODE and RIGHT-NODE into a new `hash-node', which should be SHIFT steps deep into the trie.
 
 LEFT-HASH is the hash of the entries in the LEFT-NODE.
@@ -838,20 +841,20 @@ Precondition: (/= LEFT-HASH RIGHT-HASH), or else we would construct a unified `c
   (let* ((left-index (extract-hash-part-for-shift shift left-hash))
          (right-index (extract-hash-part-for-shift shift right-hash)))
     (if (= left-index right-index)
-        (multiple-value-bind (sub-bitmap sub-node hash-node num-added)
+        (multiple-value-bind (sub-bitmap sub-node hash-node additional-return-value)
             (promote-node transient-id
                           left-key left-value left-hash left-child-type
                           right-key right-value right-hash right-child-type
                           (1+ shift)
-                          num-added)
+                          additional-return-value)
           (make-one-entry-hash-node transient-id
                                     sub-bitmap sub-node hash-node
                                     left-index
-                                    num-added))
+                                    additional-return-value))
         (make-two-entry-hash-node transient-id
                                   left-key left-value left-child-type left-index
                                   right-key right-value right-child-type right-index
-                                  num-added))))
+                                  additional-return-value))))
 
 (declaim (ftype (function (transient-id t t t t fixnum shift test-function hash-function merge-function)
                           (values t t child-type bit &optional))
@@ -886,10 +889,14 @@ Precondition: (/= LEFT-HASH RIGHT-HASH), or else we would construct a unified `c
                    (conflict-node-logical-key-ref conflict-node logical-index))
       (return logical-index))))
 
-(declaim (ftype (function (transient-id conflict-node fixnum t t array-index)
-                          (values fixnum conflict-node (eql :conflict-node) (eql 0) &optional))
+(declaim (ftype (function (transient-id conflict-node fixnum t t array-index t)
+                          (values fixnum conflict-node (eql :conflict-node) t &optional))
                 conflict-node-copy-replace-at-logical-index))
-(defun conflict-node-copy-replace-at-logical-index (transient-id conflict-node hash new-key new-value logical-index)
+(defun conflict-node-copy-replace-at-logical-index (transient-id
+                                                    conflict-node hash
+                                                    new-key new-value
+                                                    logical-index
+                                                    additional-return-value)
   "Do a functional update of CONFLICT-NODE, replacing the entry at LOGICAL-INDEX with (NEW-KEY => NEW-VALUE).
 
 The resulting node will have the TRANSIENT-ID installed.
@@ -906,7 +913,7 @@ Return four values suitable for the insertion operation: (values MY-KEY MY-VALUE
       new-value
       (:subrange conflict-node :start (+ 2 replaced-key-true-index)))
 
-    (values hash new-node :conflict-node 0)))
+    (values hash new-node :conflict-node additional-return-value)))
 
 (declaim (ftype (function (conflict-node fixnum t t array-index)
                           (values fixnum conflict-node (eql :conflict-node) (eql 0) &optional))
@@ -939,16 +946,16 @@ Return four values suitable for the insertion operation: (values MY-KEY MY-VALUE
       ;; If we're a transient and we uniquely own this node, mutate it.
       (conflict-node-set-at-logical-index conflict-node hash new-key new-value logical-index)
       ;; Otherwise, do a functional update.
-      (conflict-node-copy-replace-at-logical-index transient-id conflict-node hash new-key new-value logical-index)))
+      (conflict-node-copy-replace-at-logical-index transient-id conflict-node hash new-key new-value logical-index 0)))
 
-(declaim (ftype (function (transient-id fixnum conflict-node t t)
-                          (values fixnum conflict-node (eql :conflict-node) (eql 1) &optional))
+(declaim (ftype (function (transient-id fixnum conflict-node t t t)
+                          (values fixnum conflict-node (eql :conflict-node) t &optional))
                 add-to-conflict-node))
-(defun add-to-conflict-node (transient-id hash conflict-node new-key new-value)
+(defun add-to-conflict-node (transient-id hash conflict-node new-key new-value additional-return-value)
   "Add (NEW-KEY => NEW-VALUE) into the entries of CONFLICT-NODE.
 
 Because `conflict-node's are not adjustable, this operation must always copy CONFLICT-NODE. The TRANSIENT-ID
-will be installed in the new node, potentially allowing future transient operations to mutate it.
+will be installed in the new node, potentially allowing future transient operations to mutate it.)
 
 Precondition: NEW-ENTRY has the same hash as CONFLICT-NODE, and no existing entry in CONFLICT-NODE has the
               same key as NEW-ENTRY."
@@ -964,7 +971,7 @@ Precondition: NEW-ENTRY has the same hash as CONFLICT-NODE, and no existing entr
     (values hash
             new-node
             :conflict-node
-            1)))
+            additional-return-value)))
 
 (declaim (ftype (function (transient-id fixnum conflict-node t t fixnum shift test-function merge-function)
                           (values t t child-type bit &optional))
@@ -995,7 +1002,7 @@ instead of allocating a new node. If a new node is allocated, the TRANSIENT-ID w
            ;; If the new mapping conflicts with CONFLICT-NODE but is not already present, add it. This will
            ;; always allocate a new `conflict-node' regardless of transient-ness, because `conflict-node's are
            ;; not adjustable.
-           (add-to-conflict-node transient-id hash conflict-node new-key new-value))
+           (add-to-conflict-node transient-id hash conflict-node new-key new-value 1))
 
           (:else
            ;; If the new mapping does not conflict, grow a new `hash-node' with the CONFLICT-NODE and the new
@@ -1133,13 +1140,15 @@ Return four values suitable for the insertion or removal operation:
 (declaim (ftype (function (transient-id
                            bitmap hash-node
                            hash-node-logical-index
-                           t t child-type)
-                          (values bitmap hash-node (eql :hash-node) (eql 1) &optional))
+                           t t child-type
+                           t)
+                          (values bitmap hash-node (eql :hash-node) t &optional))
                 hash-node-insert-at))
 (defun hash-node-insert-at (transient-id
                             bitmap hash-node
                             logical-index
-                            child-key child-value child-type)
+                            child-key child-value child-type
+                            additional-return-value)
   "Add (NEW-KEY => NEW-VALUE) into the entries of HASH-NODE at LOGICAL-INDEX.
 
 Because `hash-node's are not adjustable, this operation must always copy HASH-NODE. The TRANSIENT-ID will be
@@ -1173,7 +1182,7 @@ installed in the new node, potentially allowing future transient operations to m
 
             :hash-node
 
-            1)))
+            additional-return-value)))
 
 ;; predeclaration for type inference on recursive calls by `insert-into-hash-node'
 (declaim (ftype (function (transient-id child-type t t t t fixnum shift test-function hash-function merge-function)
@@ -1224,7 +1233,9 @@ allocating a new node. If a new node is allocated, the TRANSIENT-ID will be inst
       (hash-node-insert-at transient-id
                            bitmap hash-node
                            logical-index
-                           key value :entry))))
+                           key value :entry
+                           ;; We added an entry, so return 1 as an additional value.
+                           1))))
 
 (defun node-insert (transient-id
                     body-type body-key body-value
@@ -1850,6 +1861,9 @@ but users should not rely on this behavior."
 ;;; printing dicts
 
 (defmethod print-object ((dict dict) stream)
+  #+immutable-dict-debug
+  (return-from print-object (call-next-method))
+
   (when (and *print-readably* (not *read-eval*))
     (error "Unable to readably print a DICT when *READ-EVAL* is nil."))
   ;; FIXME: handle readably printing DICTs with non-default hash and test functions
@@ -2074,3 +2088,385 @@ This is a convenience macro which expands to a `for-each' call. All notes on `fo
             ,@body))
      (declare (dynamic-extent #'do-function))
      (for-each ,dict #'do-function)))
+
+;;; UNION to combine `dict's
+
+(declaim (ftype (function (dict dict merge-function) (values dict &optional))
+                union-different-test-or-hash))
+(defun union-different-test-or-hash (left right merge-function)
+  "Merge two `dict's which have different HASH-FUNCTION and TEST-FUNCTION.
+
+The resulting `dict' will have the HASH-FUNCTION and TEST-FUNCTION from LEFT.
+
+Because two `dict's with distinct hash and test functions will have different structures, i.e. will store
+equivalent entries in different locations, this operation can do no better than iterating over RIGHT and
+inserting all of its entries into LEFT."
+  (let* ((transient (transient left)))
+    (do (key value right)
+        (insert! transient key value merge-function))
+    (persistent! transient)))
+
+;; The MERGE-FUNCTION interface on `union' specifies that the order of its LEFT- and RIGHT-VALUE arguments is
+;; the same as the order of the `dict' arguments to `union'; this allows `old-value' and `new-value' to
+;; implement left- and right-bias, respectively. As a result, anywhere in `merge-nodes' (or functions that
+;; call it) where we reverse the order of the two node arguments, we also have to reverse the argument order
+;; of the MERGE-FUNCTION.
+(defmacro with-inverted-merge-function ((inverted-name merge-function-name) &body body)
+  `(flet ((,inverted-name (key left-value right-value)
+            (funcall ,merge-function-name key right-value left-value)))
+     (declare (dynamic-extent #',inverted-name))
+     ,@body))
+
+(declaim (ftype (function (t t
+                           t t
+                           shift
+                           hash-function test-function merge-function)
+                          (values t t child-type size &optional))
+                merge-entries))
+(defun merge-entries (left-key left-value
+                      right-key right-value
+                      shift
+                      hash-function test-function merge-function
+                      &aux (left-hash (funcall hash-function left-key))
+                        (right-hash (funcall hash-function right-key)))
+  (cond ((not (= left-hash right-hash))
+         ;; If the hashes are different, make a `hash-node' to contain both entries.
+         (promote-node nil
+                       left-key left-value left-hash :entry
+                       right-key right-value right-hash :entry
+                       shift
+                       ;; No entries were merged, so return 0 as a fourth value.
+                       0))
+
+        ((funcall test-function left-key right-key)
+         ;; If the entries are the same, use the MERGE-FUNCTION to get a new entry
+         (values left-key
+
+                 (funcall merge-function left-key left-value right-value)
+
+                 :entry
+
+                 ;; We merged one entry.
+                 1))
+
+        (:else
+         ;; If the entries are a hash conflict, make a `conflict-node'
+         (make-conflict-node nil
+                             left-hash
+                             2
+
+                             ;; No entries were merged, so return 0 as a fourth value.
+                             0
+
+                             left-key left-value
+                             right-key right-value))))
+
+(declaim (ftype (function (hash conflict-node
+                           t t
+                           shift
+                           hash-function test-function merge-function)
+                          (values t t child-type size &optional))
+                merge-entry-into-conflict-node))
+(defun merge-entry-into-conflict-node (conflict-hash conflict-node
+                                       key value
+                                       shift
+                                       hash-function test-function merge-function
+                                       &aux (new-hash (funcall hash-function key)))
+  (if (= conflict-hash new-hash)
+      ;; If we have the same hash, either we need to merge, or we're adding to the conflict node.
+      (if-let ((logical-index (conflict-node-logical-index-of conflict-node key test-function)))
+        (let* ((old-value (conflict-node-logical-value-ref conflict-node logical-index))
+               (merged-value (funcall merge-function key old-value value)))
+          (conflict-node-copy-replace-at-logical-index nil
+                                                       conflict-node conflict-hash
+                                                       key merged-value
+                                                       logical-index
+                                                       ;; We merged one entry.
+                                                       1))
+
+        (add-to-conflict-node nil
+                              conflict-hash conflict-node
+                              key value
+                              ;; No entries were merged.
+                              0))
+
+      ;; If we don't have the same hash, promote to a `hash-node'
+      (promote-node nil
+                    conflict-hash conflict-node conflict-hash :conflict-node
+                    key value new-hash :entry
+                    shift
+
+                    ;; No entries were merged
+                    0)))
+
+(declaim (ftype (function (conflict-node) (values list &optional))
+                conflict-node-alist))
+(defun conflict-node-alist (conflict-node)
+  (iter (declare (declare-variables))
+    (for logical-index below (conflict-node-logical-length conflict-node))
+    (for (values key value) = (conflict-node-logical-ref conflict-node logical-index))
+    ;; AT BEGINNING saves an `nreverse'
+    (collect (cons key value) at beginning)))
+
+(declaim (ftype (function (list list test-function merge-function) (values list size &optional))
+                alist-merge))
+(defun alist-merge (left right test-function merge-function)
+  (labels ((loop-for-entry-in-left (left right acc num-merged)
+             (declare (size num-merged))
+             (cond ((and (not left) (not right)) (values acc num-merged))
+
+                   ((not left) (values (append right acc) num-merged))
+
+                   ((not right) (values (append left acc) num-merged))
+
+                   (:else (destructuring-bind ((key . value) &rest left) left
+                            (loop-find-match-in-right key value left right nil acc num-merged)))))
+
+           (loop-find-match-in-right (left-key left-value left right-to-search right-already-searched acc num-merged)
+             (declare (size num-merged))
+             (if (null right-to-search)
+                 (loop-for-entry-in-left left right-already-searched (acons left-key left-value acc) num-merged)
+                 (destructuring-bind ((right-key . right-value) &rest right-to-search) right-to-search
+                   (if (funcall test-function left-key right-key)
+
+                       (loop-for-entry-in-left left
+                                               (append right-to-search right-already-searched)
+                                               (acons left-key (funcall merge-function left-key left-value right-value) acc)
+                                               (1+ num-merged))
+
+                       (loop-find-match-in-right left-key left-value left
+                                                 right-to-search
+                                                 (acons right-key right-value right-already-searched)
+                                                 acc
+                                                 num-merged))))))
+    (loop-for-entry-in-left left right nil 0)))
+
+(declaim (ftype (function (hash conflict-node
+                           hash conflict-node
+                           shift
+                           test-function merge-function)
+                          (values t t child-type size &optional))
+                merge-conflict-nodes))
+(defun merge-conflict-nodes (left-hash left-node
+                             right-hash right-node
+                             shift
+                             test-function merge-function)
+  (if (/= left-hash right-hash)
+      ;; If we have different hashes, promote to a `hash-node'
+      (promote-node nil
+                    left-hash left-node left-hash :conflict-node
+                    right-hash right-node right-hash :conflict-node
+                    shift
+                    ;; No entries were merged
+                    0)
+
+      ;; If we have the same hash, the nasty case: we have to do a setwise union on the two arrays.
+      (let* ((unmatched-left (conflict-node-alist left-node))
+             (unmatched-right (conflict-node-alist right-node)))
+        (multiple-value-bind (merged-alist num-merged)
+            (alist-merge unmatched-left unmatched-right test-function merge-function)
+          (let* ((new-length (- (+ (conflict-node-logical-length left-node)
+                                   (conflict-node-logical-length right-node))
+                                num-merged))
+                 (new-node (%make-conflict-node :length (logical-count-to-paired-length new-length))))
+            (iter (declare (declare-variables))
+              (for logical-index below new-length)
+              (for (key . value) in merged-alist)
+              (set-conflict-node-logical-entry new-node logical-index key value))
+            (values left-hash new-node :conflict-node num-merged))))))
+
+(declaim (ftype (function (child-type t t
+                           child-type t t
+                           shift
+                           hash-function test-function merge-function)
+                          (values t t child-type size &optional))
+                merge-nodes))
+
+(declaim (ftype (function (bitmap hash-node
+                           (member :conflict-node :entry) t t
+                           shift
+                           hash-function test-function merge-function)
+                          (values bitmap hash-node (eql :hash-node) size &optional))
+                merge-child))
+(defun merge-child (bitmap hash-node
+                    new-type new-key new-value
+                    shift
+                    hash-function test-function merge-function)
+  (let* ((new-hash (ecase new-type
+                     (:conflict-node new-key)
+                     (:entry (funcall hash-function new-key))))
+         (new-idx (extract-hash-part-for-shift shift new-hash)))
+    (if (bitmap-contains-p bitmap new-idx)
+        ;; If we already have a child there, merge the two.
+        (let* ((old-type (hash-node-child-type hash-node bitmap new-idx)))
+          (multiple-value-bind (old-key old-value)
+              (hash-node-logical-ref hash-node bitmap new-idx)
+            (multiple-value-bind (merged-key merged-value merged-type num-merged)
+                (merge-nodes old-type old-key old-value
+                             new-type new-key new-value
+                             (1+ shift)
+                             hash-function test-function merge-function)
+              (hash-node-copy-replace-at nil
+                                         bitmap hash-node
+                                         new-idx
+                                         merged-key merged-value merged-type
+                                         num-merged))))
+
+        ;; If we don't have a child there, insert.
+        (hash-node-insert-at nil
+                             bitmap hash-node
+                             new-idx
+                             new-key new-value new-type
+                             ;; We didn't merge any entries.
+                             0))))
+
+(declaim (ftype (function (bitmap hash-node
+                           bitmap hash-node
+                           shift
+                           hash-function test-function merge-function)
+                          (values bitmap hash-node (eql :hash-node) size))
+                merge-hash-nodes))
+(defun merge-hash-nodes (left-bitmap left-node
+                         right-bitmap right-node
+                         shift
+                         hash-function test-function merge-function)
+  (let* ((merged-bitmap (logior left-bitmap right-bitmap))
+         (merged-size (logcount merged-bitmap))
+         (new-node (%make-hash-node :child-is-entry-p 0
+                                    :child-is-conflict-p 0
+                                    :length (logical-count-to-paired-length merged-size)))
+         (num-merged 0))
+    (declare (size num-merged))
+    (iter (declare (declare-variables))
+      (for logical-index below +branch-rate+)
+      (for left-type = (hash-node-child-type left-node left-bitmap logical-index))
+      (for right-type = (hash-node-child-type right-node right-bitmap logical-index))
+      (cond ((and left-type right-type)
+
+             (multiple-value-bind (left-key left-value)
+                 (hash-node-logical-ref left-node left-bitmap logical-index)
+               (multiple-value-bind (right-key right-value)
+                   (hash-node-logical-ref right-node right-bitmap logical-index)
+                 (multiple-value-bind (child-key child-value child-type child-num-merged)
+                     (merge-nodes left-type left-key left-value
+                                  right-type right-key right-value
+                                  (1+ shift)
+                                  hash-function test-function merge-function)
+                   (incf num-merged child-num-merged)
+                   (hash-node-set-at-logical-index merged-bitmap new-node logical-index
+                                                   child-key child-value child-type
+                                                   nil)))))
+
+            (left-type
+             (multiple-value-bind (left-key left-value)
+                 (hash-node-logical-ref left-node left-bitmap logical-index)
+               (hash-node-set-at-logical-index merged-bitmap new-node logical-index
+                                               left-key left-value left-type
+                                               nil)))
+
+            (right-type
+             (multiple-value-bind (right-key right-value)
+                 (hash-node-logical-ref right-node right-bitmap logical-index)
+               (hash-node-set-at-logical-index merged-bitmap new-node logical-index
+                                               right-key right-value right-type
+                                               nil)))
+
+            (:else nil)))
+
+    (values merged-bitmap new-node :hash-node num-merged)))
+
+(defun merge-nodes (left-type left-key left-value
+                    right-type right-key right-value
+                    shift
+                    hash-function test-function merge-function)
+  (cond ((null left-type) (values right-key right-value right-type 0))
+        ((null right-type) (values left-key left-value left-type 0))
+
+        ;; past here, neither side is null
+
+        ((and (eq left-type :hash-node) (eq right-type :hash-node))
+         (merge-hash-nodes left-key left-value
+                           right-key right-value
+                           shift
+                           hash-function test-function merge-function))
+
+        ((eq left-type :hash-node)
+         (merge-child left-key left-value
+                      right-type right-key right-value
+                      shift
+                      hash-function test-function merge-function))
+
+        ((eq right-type :hash-node)
+         (with-inverted-merge-function (inverted-merge-function merge-function)
+           (merge-child right-key right-value
+                        left-type left-key left-value
+                        shift
+                        hash-function test-function #'inverted-merge-function)))
+
+        ;; past here, neither side is a `:hash-node'
+
+        ((and (eq left-type :conflict-node) (eq right-type :conflict-node))
+         (merge-conflict-nodes left-key left-value
+                               right-key right-value
+                               shift
+                               test-function merge-function))
+
+        ((eq left-type :conflict-node)
+         (merge-entry-into-conflict-node left-key left-value
+                                         right-key right-value
+                                         shift
+                                         hash-function test-function merge-function))
+
+        ((eq right-type :conflict-node)
+         (with-inverted-merge-function (inverted-merge-function merge-function)
+           (merge-entry-into-conflict-node right-key right-value
+                                           left-key left-value
+                                           shift
+                                           hash-function test-function #'inverted-merge-function)))
+
+        ;; past here, neither side is a `:conflict-node'
+
+        (:else
+         (merge-entries left-key left-value
+                        right-key right-value
+                        shift
+                        hash-function test-function merge-function))))
+
+(declaim (ftype (function (dict dict merge-function) (values dict &optional))
+                union-same-test-and-hash))
+(defun union-same-test-and-hash (left right merge-function
+                                 &aux (hash-function (hash-function left))
+                                   (test-function (test-function left)))
+  (multiple-value-bind (new-key new-value new-type num-merged)
+      (merge-nodes (%dict-child-type left) (%dict-key left) (%dict-value left)
+                   (%dict-child-type right) (%dict-key right) (%dict-value right)
+                   0
+                   hash-function test-function merge-function)
+    (%make-dict :size (- (+ (size left) (size right)) num-merged)
+                :hash-function hash-function
+                :test-function test-function
+                :child-type new-type
+                :key new-key
+                :value new-value)))
+
+(declaim (ftype (function (dict dict &optional merge-function) (values dict &optional))
+                union))
+(defun union (left right &optional (merge-function #'new-value))
+  "Construct a new `dict' containing all the entries from both LEFT and RIGHT.
+
+The MERGE-FUNCTION defines the behavior when a KEY is present in both LEFT and RIGHT. In that case, it is
+invoked with (KEY LEFT-VALUE RIGHT-VALUE), and should return a MERGED-VALUE. The resulting `dict' will map KEY
+to MERGED-VALUE. The default is `new-value', which selects the RIGHT-VALUE.
+
+If LEFT and RIGHT have different HASH-FUNCTIONs and/or TEST-FUNCTIONs, the resulting `dict' will use the
+HASH-FUNCTION and TEST-FUNCTION from LEFT. In that case, this operation is relatively inefficient; it iterates
+over RIGHT as if by `for-each' and uses `insert!' to add each entry to a `transient' derived from LEFT. This
+may allocate intermediate nodes not necessary to represent the result.
+
+If LEFT and RIGHT have the same HASH-FUNCTION and TEST-FUNCTION (by `eq'), a more efficient implementation
+will walk the structure of LEFT and RIGHT in parallel, allocating only enough structure to represent the
+resulting `dict'."
+  (if (and (eq (test-function left) (test-function right))
+           (eq (hash-function left) (hash-function right)))
+      (union-same-test-and-hash left right merge-function)
+      (union-different-test-or-hash left right merge-function)))

@@ -129,12 +129,12 @@ shadow CL symbols liberally to accomplish this.
     - [x] tests
   - [x] remove multiple pairs - `remove-multiple`
     - [x] tests
-  - [ ] combine two (or more?) maps - `union`
-    - [ ] check for compatible hash and equality functions
+  - [x] combine two maps - `union`
+    - [x] check for compatible hash and equality functions
       - [ ] solve equality testing on arbitrary closures /s
-      - [ ] fall back to `reduce` of `insert` when the hash and equality functions are not `eq`
-      - [ ] structural merge when the hash and equality functions are `eq`
-    - [ ] accept a `merge-entries` function of type `(function (key &rest value) (values
+      - [x] fall back to `reduce` of `insert` when the hash and equality functions are not `eq`
+      - [x] structural merge when the hash and equality functions are `eq`
+    - [x] accept a `merge-entries` function of type `(function (key value value) (values
           value &optional))` to avoid left- or right-bias
   - [ ] convenient iteration constructs
     - [x] `map-values` - apply function to each value, leaving keys untouched, collect to new `dict`
