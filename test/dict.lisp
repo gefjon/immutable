@@ -3,7 +3,8 @@
   (:import-from :alexandria
                 #:set-equal
                 #:shuffle
-                #:with-gensyms)
+                #:with-gensyms
+                #:symbolicate)
   (:local-nicknames (#:dict :immutable/dict)
                     (#:hash :immutable/hash))
   (:export #:immutable-dict-suite))
@@ -12,6 +13,27 @@
 (declaim (optimize (debug 3) (speed 2) (safety 3) (space 1) (compilation-speed 0)))
 
 (def-suite immutable-dict-suite)
+
+(eval-when (:compile-toplevel :load-toplevel)
+  (defun hash-always-conflict (thing)
+    (declare (ignore thing))
+    0)
+  (defparameter *test-and-hash-functions*
+    (list (cons 'hash:== 'hash:hash)
+          (cons 'equal 'sxhash)
+          (cons 'hash:== 'hash-always-conflict)
+          (cons 'equal 'hash-always-conflict))))
+
+(defmacro define-test (name (test-function hash-function) &body body)
+  (let* ((func-name (gensym (symbol-name name))))
+    (flet ((test-name (test-function hash-function)
+             (symbolicate name '- test-function '- hash-function)))
+      `(progn
+         (defun ,func-name (,test-function ,hash-function)
+           ,@body)
+         ,@(iter (for (test . hash) in *test-and-hash-functions*)
+             (collect `(def-test ,(test-name test hash) (:suite immutable-dict-suite)
+                         (,func-name ',test ',hash))))))))
 
 (declaim (ftype (function (dict::shift fixnum) (values fixnum &optional))
                 bits-below-shift))
@@ -211,115 +233,80 @@
                      (dict::%dict-test-function a) (dict::%dict-hash-function a)
                      same-value)))
 
-(def-test small-integer-to-string (:suite immutable-dict-suite)
-  (flet ((is-behavior-sane (test-function)
-           (let* ((dict (quietly (iter (with partial-dict = (dict:empty :test-function test-function))
-                                   (for i below 128)
-                                   (for inserted = (dict:insert partial-dict
-                                                                i
-                                                                (princ-to-string i)))
-                                   (is (= (1+ i) (dict:size inserted)))
-                                   (is (not (eq partial-dict inserted)))
-                                   (setf partial-dict inserted)
-                                   (finally (return partial-dict))))))
-             (is-dict-valid dict)
-             (quietly
-               (iter (for i below 128)
-                 (is (string= (princ-to-string i)
-                              (dict:get dict i ""))
-                     "Expected dict[~a] to be ~s but found ~s in ~s"
-                     i
-                     (princ-to-string i)
-                     (dict:get dict i "")
-                     dict)))
-             (quietly
-               (iter (with partial-dict = dict)
-                 (for i below 128)
-                 (for removed = (dict:remove partial-dict i))
-                 (is (not (eq partial-dict removed)))
-                 (is (= (- 128 i 1) (dict:size removed))
-                     "After removing ~d, expected the dict's size to be ~d, but found ~d"
-                     i
-                     (- 128 i 1)
-                     (dict:size removed))
-                 (setf partial-dict removed))))))
-    (is-behavior-sane 'hash:==)
-    (is-behavior-sane 'equal)))
-
-(def-test small-integer-to-string-random-order-same-structure (:suite immutable-dict-suite)
-  (flet ((is-behavior-sane (test-function)
-           (let* ((entries (iter (for i below 128)
-                             (collect (list i (princ-to-string i)))))
-                  (entries-dict (make-dict-by-reduce entries :test-function test-function)))
-             (is-dict-valid entries-dict)
-             (flet ((gen-shuffle ()
-                      (shuffle (copy-seq entries))))
-               (for-all ((shuffled #'gen-shuffle))
-                 (let* ((shuffled-dict (make-dict-by-reduce shuffled :test-function test-function)))
-                   (is-dict-valid shuffled-dict)
-                   (quietly
-                     (iter (for i below 128)
-                       (for (values entry presentp) = (dict:get entries-dict i))
-                       (for (values shuffled-entry shuffled-presentp) = (dict:get shuffled-dict i))
-                       (is-true presentp)
-                       (is-true shuffled-presentp)
-                       (is (string= entry shuffled-entry))))
-                   (are-structures-same entries-dict shuffled-dict)))))))
-    (is-behavior-sane 'hash:==)
-    (is-behavior-sane 'equal)))
-
-(def-test replace-size-consistent (:suite immutable-dict-suite)
-  (flet ((is-size-consistent-after-replace (test-function)
-           (let* ((entries (iter (for i below 128)
-                             (collect (list i i))))
-                  (id-dict (make-dict-by-reduce entries :test-function test-function)))
-             (is-dict-valid id-dict)
-             (is (= 128 (dict:size id-dict)))
-             (iter (for i below 128)
-               (for new-value = (1+ i))
-               (for replaced-dict = (dict:insert id-dict i new-value))
-               (is (= new-value
-                      (dict:get replaced-dict i)))
-               (is (= (dict:size id-dict)
-                      (dict:size replaced-dict)))
-               (is (= i
-                      (dict:get id-dict i)))))))
-    (is-size-consistent-after-replace 'hash:==)
-    (is-size-consistent-after-replace 'equal)))
-
-(def-test insert-lookup-replace-remove-artificial-conflict (:suite immutable-dict-suite)
-  (let* ((id-dict (iter (with partial = (dict:empty :test-function #'eql
-                            :hash-function (constantly 0)))
-                    (for i below 128)
-                    (setf partial (dict:insert partial i i))
-                    (finally (return partial)))))
-    (is-dict-valid id-dict)
-    (is (= 128 (dict:size id-dict)))
+(define-test small-integer-to-string (test-function hash-function)
+  (let* ((dict (quietly (iter (with partial-dict = (dict:empty :test-function test-function
+                                                               :hash-function hash-function))
+                          (for i below 128)
+                          (for inserted = (dict:insert partial-dict
+                                                       i
+                                                       (princ-to-string i)))
+                          (is (= (1+ i) (dict:size inserted)))
+                          (is (not (eq partial-dict inserted)))
+                          (setf partial-dict inserted)
+                          (finally (return partial-dict))))))
+    (is-dict-valid dict)
     (quietly
       (iter (for i below 128)
-        (for (values val presentp) = (dict:get id-dict i))
-        (is-true presentp)
-        (is (eql i val))))
-    (let* ((replaced (iter (with partial = id-dict)
-                       (for i below 128)
-                       (setf partial (dict:insert partial i (1+ i)))
-                       (finally (return partial)))))
-      (is-dict-valid replaced)
-      (is (= 128 (dict:size replaced)))
-      (quietly
-        (iter (for i below 128)
-          (for (values val presentp) = (dict:get replaced i))
-          (is-true presentp)
-          (is (eql (1+ i) val))))
-      (let* ((removed (iter (with partial = replaced)
-                        (for i below 128)
-                        (setf partial (dict:remove partial i))
-                        (finally (return partial)))))
-        (is-dict-valid removed)
-        (is (= 0 (dict:size removed)))))))
+        (is (string= (princ-to-string i)
+                     (dict:get dict i ""))
+            "Expected dict[~a] to be ~s but found ~s in ~s"
+            i
+            (princ-to-string i)
+            (dict:get dict i "")
+            dict)))
+    (quietly
+      (iter (with partial-dict = dict)
+        (for i below 128)
+        (for removed = (dict:remove partial-dict i))
+        (is (not (eq partial-dict removed)))
+        (is (= (- 128 i 1) (dict:size removed))
+            "After removing ~d, expected the dict's size to be ~d, but found ~d"
+            i
+            (- 128 i 1)
+            (dict:size removed))
+        (setf partial-dict removed)))))
 
-(def-test detect-stale-transient (:suite immutable-dict-suite)
-  (let* ((transient (dict:transient (dict:empty)))
+(define-test small-integer-to-string-random-order-same-structure (test-function hash-function)
+  (let* ((entries (iter (for i below 128)
+                    (collect (list i (princ-to-string i)))))
+         (entries-dict (make-dict-by-reduce entries :test-function test-function
+                                                    :hash-function hash-function)))
+    (is-dict-valid entries-dict)
+    (flet ((gen-shuffle ()
+             (shuffle (copy-seq entries))))
+      (for-all ((shuffled #'gen-shuffle))
+        (let* ((shuffled-dict (make-dict-by-reduce shuffled :test-function test-function
+                                                            :hash-function hash-function)))
+          (is-dict-valid shuffled-dict)
+          (quietly
+            (iter (for i below 128)
+              (for (values entry presentp) = (dict:get entries-dict i))
+              (for (values shuffled-entry shuffled-presentp) = (dict:get shuffled-dict i))
+              (is-true presentp)
+              (is-true shuffled-presentp)
+              (is (string= entry shuffled-entry))))
+          (are-structures-same entries-dict shuffled-dict))))))
+
+(define-test replace-size-consistent (test-function hash-function)
+  (let* ((entries (iter (for i below 128)
+                    (collect (list i i))))
+         (id-dict (make-dict-by-reduce entries :test-function test-function
+                                               :hash-function hash-function)))
+    (is-dict-valid id-dict)
+    (is (= 128 (dict:size id-dict)))
+    (iter (for i below 128)
+      (for new-value = (1+ i))
+      (for replaced-dict = (dict:insert id-dict i new-value))
+      (is (= new-value
+             (dict:get replaced-dict i)))
+      (is (= (dict:size id-dict)
+             (dict:size replaced-dict)))
+      (is (= i
+             (dict:get id-dict i))))))
+
+(define-test detect-stale-transient (test-function hash-function)
+  (let* ((transient (dict:transient (dict:empty :test-function test-function
+                                                :hash-function hash-function)))
          (persistent (dict:persistent! transient)))
     (is-dict-valid persistent)
     ;; operations that are disallowed on stale transients
@@ -333,8 +320,9 @@
     (is (null (dict:get transient 0)))
     (is (zerop (dict:size transient)))))
 
-(def-test transient-not-observable (:suite immutable-dict-suite)
-  (let* ((dict (iter (with partial = (dict:empty))
+(define-test transient-not-observable (test-function hash-function)
+  (let* ((dict (iter (with partial = (dict:empty :test-function test-function
+                                                 :hash-function hash-function))
                  (for i below 128)
                  (setf partial (dict:insert partial i i))
                  (finally (return partial))))
@@ -381,46 +369,43 @@
     (is-false (dict:get dict "TWO"))
     (is-false (dict:get dict "THREE"))))
 
-(def-test for-each-sum (:suite immutable-dict-suite)
-  (flet ((is-behavior-sane (test-function)
-           (let* ((dict (iter (with partial = (dict:empty :test-function test-function))
-                          (for i below 128)
-                          (setf partial (dict:insert partial i i))
-                          (finally (return partial))))
-                  (expected-sum (/ (* 127 (1+ 127)) 2))
-                  (sum-for-each 0)
-                  (sum-do 0))
-             (is-dict-valid dict)
-             (quietly
-               (dict:for-each dict
-                              (lambda (k v)
-                                (is (= k v))
-                                (incf sum-for-each v)))
-               (dict:do (k v dict)
-                 (is (= k v))
-                 (incf sum-do v)))
-             (is (= expected-sum sum-for-each))
-             (is (= expected-sum sum-do)))))
-    (is-behavior-sane 'hash:==)
-    (is-behavior-sane 'equal)))
+(define-test for-each-sum (test-function hash-function)
+  (let* ((dict (iter (with partial = (dict:empty :test-function test-function
+                                                 :hash-function hash-function))
+                 (for i below 128)
+                 (setf partial (dict:insert partial i i))
+                 (finally (return partial))))
+         (expected-sum (/ (* 127 (1+ 127)) 2))
+         (sum-for-each 0)
+         (sum-do 0))
+    (is-dict-valid dict)
+    (quietly
+      (dict:for-each dict
+                     (lambda (k v)
+                       (is (= k v))
+                       (incf sum-for-each v)))
+      (dict:do (k v dict)
+               (is (= k v))
+        (incf sum-do v)))
+    (is (= expected-sum sum-for-each))
+    (is (= expected-sum sum-do))))
 
-(def-test map-values-1+ (:suite immutable-dict-suite)
-  (flet ((is-behavior-sane (test-function)
-           (let* ((dict (iter (with partial = (dict:empty :test-function test-function))
-                          (for i below 128)
-                          (setf partial (dict:insert partial i i))
-                          (finally (return partial))))
-                  (mapped (dict:map-values dict #'1+)))
-             (is-dict-valid dict)
-             (is-dict-valid mapped)
-             (are-structures-same dict mapped
-                                  (lambda (old new)
-                                    (eql (1+ old) new)))
-             (iter (for i below 128)
-               (is (eql i (dict:get dict i)))
-               (is (eql (1+ i) (dict:get mapped i)))))))
-    (is-behavior-sane 'hash:==)
-    (is-behavior-sane 'equal)))
+(define-test map-values-1+ (test-function hash-function)
+  (let* ((dict (iter (with partial = (dict:empty :test-function test-function
+                                                 :hash-function hash-function))
+                 (for i below 128)
+                 (setf partial (dict:insert partial i i))
+                 (finally (return partial))))
+         (mapped (dict:map-values dict #'1+)))
+    (is-dict-valid dict)
+    (is-dict-valid mapped)
+    (is (eq (dict:test-function dict) (dict:test-function mapped)))
+    (is (eq (dict:hash-function dict) (dict:hash-function mapped)))
+    (are-structures-same dict mapped
+                         nil)
+    (iter (for i below 128)
+      (is (eql i (dict:get dict i)))
+      (is (eql (1+ i) (dict:get mapped i))))))
 
 (defun merge-function-fail (k o n)
   (fail "Unexpectedly called MERGE-FUNCTION.
@@ -431,90 +416,87 @@ Called with:
   NEW-VALUE = ~a"
         k o n))
 
-(def-test merge-function-old-value (:suite immutable-dict-suite)
+(define-test merge-function-old-value (test-function hash-function)
   (let* ((old '#:old)
-         (new '#:new))
-    (labels ((is-behavior-sane (test-function)
-               (let* ((dict (quietly (iter (with partial-dict = (dict:empty :test-function test-function))
-                                   (for i below 128)
-                                   (for inserted = (dict:insert partial-dict
-                                                                i
-                                                                old
-                                                                #'merge-function-fail))
-                                   (is (= (1+ i) (dict:size inserted)))
-                                   (is (not (eq partial-dict inserted)))
-                                   (setf partial-dict inserted)
-                                   (finally (return partial-dict)))))
-                  (by-transient (iter (with transient = (dict:transient (dict:empty :test-function test-function)))
-                                  (for i below 128)
-                                  (dict:insert! transient i old #'merge-function-fail)
-                                  (finally (return (dict:persistent! transient))))))
-             (is-dict-valid dict)
-             (is-dict-valid by-transient)
-             (are-structures-same dict by-transient)
-             (quietly
-               (iter (for i below 128)
-                 (is (eq old (dict:get dict i '#:wrong)))
-                 (is (eq old (dict:get dict i '#:wrong)))))
-             (let* ((replaced (quietly
-                                (iter (with partial-dict = dict)
-                                  (for i below 128)
-                                  (for replaced = (dict:insert partial-dict i new #'dict:old-value))
-                                  (is (not (eq partial-dict replaced)))
-                                  (setf partial-dict replaced)
-                                  (finally (return replaced)))))
-                    (replaced-transient (iter (with transient = (dict:transient dict))
-                                          (for i below 128)
-                                          (dict:insert! transient i new #'dict:old-value)
-                                          (finally (return (dict:persistent! transient))))))
-               (is-dict-valid replaced)
-               (is-dict-valid replaced-transient)
-               (are-structures-same replaced replaced-transient)
-               (are-structures-same dict replaced)
-               (quietly
-                 (iter (declare (declare-variables))
-                   (for i below 128)
-                   (is (eq old
-                           (dict:get replaced i)))
-                   (is (eq old
-                           (dict:get replaced-transient i)))))))))
-    (is-behavior-sane 'hash:==)
-    (is-behavior-sane 'equal))))
+         (new '#:new)
+         (dict (quietly (iter (with partial-dict = (dict:empty :test-function test-function
+                                                               :hash-function hash-function))
+                          (for i below 128)
+                          (for inserted = (dict:insert partial-dict
+                                                       i
+                                                       old
+                                                       #'merge-function-fail))
+                          (is (= (1+ i) (dict:size inserted)))
+                          (is (not (eq partial-dict inserted)))
+                          (setf partial-dict inserted)
+                          (finally (return partial-dict)))))
+         (by-transient (iter (with transient = (dict:transient (dict:empty :test-function test-function
+                                                                           :hash-function hash-function)))
+                         (for i below 128)
+                         (dict:insert! transient i old #'merge-function-fail)
+                         (finally (return (dict:persistent! transient))))))
+    (is-dict-valid dict)
+    (is-dict-valid by-transient)
+    (are-structures-same dict by-transient)
+    (quietly
+      (iter (for i below 128)
+        (is (eq old (dict:get dict i '#:wrong)))
+        (is (eq old (dict:get dict i '#:wrong)))))
+    (let* ((replaced (quietly
+                       (iter (with partial-dict = dict)
+                         (for i below 128)
+                         (for replaced = (dict:insert partial-dict i new #'dict:old-value))
+                         (is (not (eq partial-dict replaced)))
+                         (setf partial-dict replaced)
+                         (finally (return replaced)))))
+           (replaced-transient (iter (with transient = (dict:transient dict))
+                                 (for i below 128)
+                                 (dict:insert! transient i new #'dict:old-value)
+                                 (finally (return (dict:persistent! transient))))))
+      (is-dict-valid replaced)
+      (is-dict-valid replaced-transient)
+      (are-structures-same replaced replaced-transient)
+      (are-structures-same dict replaced)
+      (quietly
+        (iter (declare (declare-variables))
+          (for i below 128)
+          (is (eq old
+                  (dict:get replaced i)))
+          (is (eq old
+                  (dict:get replaced-transient i))))))))
 
-(def-test merge-function-+ (:suite immutable-dict-suite)
+(define-test merge-function-+ (test-function hash-function)
   (labels ((merge-+ (key old-value new-value)
              (declare (ignore key))
-             (+ old-value new-value))
-           (is-behavior-sane (test-function)
-             (let* ((dict (quietly (iter (with partial = (dict:empty :test-function test-function))
-                                     (for i below 128)
-                                     (for inserted = (dict:insert partial
-                                                                  i
-                                                                  i
-                                                                  #'merge-function-fail))
-                                     (is (= (1+ i) (dict:size inserted)))
-                                     (is (not (eq partial inserted)))
-                                     (setf partial inserted)
-                                     (finally (return partial))))))
-               (is-dict-valid dict)
-               (quietly
-                 (iter (for i below 128)
-                   (is (eql i (dict:get dict i)))))
-               (let* ((doubled (iter (with partial = dict)
-                                 (for i below 128)
-                                 (setf partial (dict:insert partial i i #'merge-+))
-                                 (finally (return partial)))))
-                 (is-dict-valid doubled)
-                 (are-structures-same dict doubled (lambda (small big)
-                                                      (= (* small 2) big)))
-                 (quietly
-                   (iter (for i below 128)
-                     (is (eql (dict:get doubled i)
-                              (* i 2)))))))))
-    (is-behavior-sane 'hash:==)
-    (is-behavior-sane 'equal)))
+             (+ old-value new-value)))
+    (let* ((dict (quietly (iter (with partial = (dict:empty :test-function test-function
+                                                            :hash-function hash-function))
+                            (for i below 128)
+                            (for inserted = (dict:insert partial
+                                                         i
+                                                         i
+                                                         #'merge-function-fail))
+                            (is (= (1+ i) (dict:size inserted)))
+                            (is (not (eq partial inserted)))
+                            (setf partial inserted)
+                            (finally (return partial))))))
+      (is-dict-valid dict)
+      (quietly
+        (iter (for i below 128)
+          (is (eql i (dict:get dict i)))))
+      (let* ((doubled (iter (with partial = dict)
+                        (for i below 128)
+                        (setf partial (dict:insert partial i i #'merge-+))
+                        (finally (return partial)))))
+        (is-dict-valid doubled)
+        (are-structures-same dict doubled
+                             nil)
+        (quietly
+          (iter (for i below 128)
+            (is (eql (dict:get doubled i)
+                     (* i 2)))))))))
 
-(def-test insert-multiple-like-insert (:suite immutable-dict-suite)
+(define-test insert-multiple-like-insert (test-function hash-function)
   (labels ((insert-range (dict min max method)
              (ecase method
                (:insert (iter (with partial = dict)
@@ -548,12 +530,10 @@ Called with:
                      (are-structures-same a b)
                      (while rest))
                    (insert-range-each-method-and-compare (first dicts)
-                                                         (+ min step) step max))))
-           (is-behavior-sane (test-function)
-             (let* ((empty (dict:empty :test-function test-function))
-                    (dict (insert-range-each-method-and-compare empty 0 16 128)))
-               (is (= 128 (dict:size dict)))
-               (iter (for i below 128)
-                 (is (eql i (dict:get dict i)))))))
-    (is-behavior-sane 'hash:==)
-    (is-behavior-sane 'equal)))
+                                                         (+ min step) step max)))))
+    (let* ((empty (dict:empty :test-function test-function
+                              :hash-function hash-function))
+           (dict (insert-range-each-method-and-compare empty 0 16 128)))
+      (is (= 128 (dict:size dict)))
+      (iter (for i below 128)
+        (is (eql i (dict:get dict i)))))))
