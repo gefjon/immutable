@@ -35,8 +35,37 @@
    #:stale-transient-operation
    #:stale-transient-transient
 
+   ;; unknown hash function error
+   #:no-hash-function-for-test
+   #:no-hash-function-for-test-function
+   #:no-hash-function-for-test-known-hash-functions
+
+   ;; invalid hash table test error, for `to-hash-table'
+   #:invalid-hash-table-test
+   #:invalid-hash-table-test-test
+
+   ;; malformed plist and alist errors, for `from-alist', `insert-alist' and plist equivalents
+   #:malformed-plist
+   #:malformed-plist-plist
+   #:malformed-plist-operator
+
+   #:malformed-alist
+   #:malformed-alist-alist
+   #:malformed-alist-operator
+
+   ;; error when converting a collection would cause a collision due to different hash/test functions
+   #:convert-overwrite
+   #:convert-overwrite-key
+   #:convert-overwrite-old-value
+   #:convert-overwrite-new-value
+   #:convert-overwrite-operation
+   #:convert-overwrite-source
+
    ;; reading properties of dicts and transients
    #:size #:test-function #:hash-function
+
+   ;; Registering new test-function/hash-function pairs
+   #:define-test-hash-function
 
    ;; GETHASH analogue
    #:get
@@ -51,7 +80,7 @@
    #:remove #:remove!
 
    ;; MAKE-HASH-TABLE analogue to construct an empty dict
-   #:empty
+   #:empty #:empty-transient
 
    ;; Batched insertions and removals
    #:insert-plist
@@ -65,7 +94,12 @@
    #:do
 
    ;; Combining dicts
-   #:union))
+   #:union
+
+   ;; Converting to/from CL mapping collections
+   #:from-hash-table #:to-hash-table
+   #:from-alist #:to-alist
+   #:from-plist #:to-plist))
 (in-package :immutable/dict)
 
 #+immutable-dict-debug
@@ -1714,7 +1748,44 @@ IMMUTABLE/DICT can only automatically deduce :HASH-FUNCTIONs when the :TEST-FUNC
              :known-test-hash-functions *test-hash-functions*))
     hash-function))
 
+(declaim (ftype (function ((or null
+                               (and symbol (not keyword) (not boolean))
+                               test-function)
+                           (or null
+                               (and symbol (not keyword) (not boolean))
+                               hash-function))
+                          (values test-function hash-function &optional))
+                normalize-test-and-hash-functions))
+(defun normalize-test-and-hash-functions (test hash)
+  (let* ((defaulted-test (or test '==))
+         (hash-function (coerce-to-function (cond (hash
+                                                   (coerce-to-function hash))
+                                                  ((symbolp defaulted-test)
+                                                   (test-hash-function defaulted-test))
+                                                  (:else
+                                                   (error 'no-hash-function-for-test
+                                                          :test-function defaulted-test
+                                                          :known-test-hash-functions *test-hash-functions*)))))
+         (test-function (coerce-to-function defaulted-test)))
+    (values test-function hash-function)))
+
 ;;; EMPTY constructor
+
+(eval-when (:compile-toplevel :load-toplevel)
+  (defparameter *hash-and-test-docstring*
+    "If only TEST-FUNCTION is supplied, it must be a symbol. A suitable HASH-FUNCTION will be selected. See
+`define-test-hash-function' for defining new pairs of test and hash functions.
+
+If both TEST-FUNCTION and HASH-FUNCTION are supplied, they may be either symbols or function objects.
+
+Symbols will be coerced into functions by `symbol-function', which will use the global function binding,
+ignoring any local binding.
+
+If not supplied, TEST-FUNCTION defaults to `immutable/hash:==', and HASH-FUNCTION to `immutable/hash:hash'."
+
+    ;; TODO: add to docstring: laws for test and hash functions.
+    ;; TODO: add to docstring: automatically generated listing of *TEST-HASH-FUNCTIONS*.
+    ))
 
 (declaim (ftype (function (&key (:test-function (or (and symbol (not keyword) (not boolean))
                                                     test-function))
@@ -1723,23 +1794,43 @@ IMMUTABLE/DICT can only automatically deduce :HASH-FUNCTIONs when the :TEST-FUNC
                                                     hash-function)))
                           (values dict &optional))
                 empty))
-(defun empty (&key (test-function '==)
-                (hash-function nil))
-  (let* ((hash-function (coerce-to-function (cond (hash-function
-                                                   (coerce-to-function hash-function))
-                                                  ((symbolp test-function)
-                                                   (test-hash-function test-function))
-                                                  (:else
-                                                   (error 'no-hash-function-for-test
-                                                          :test-function test-function
-                                                          :known-test-hash-functions *test-hash-functions*)))))
-         (test-function (coerce-to-function test-function)))
+(defun empty (&key test-function
+                hash-function)
+  #.(format nil "Construct an empty `dict' with the provided TEST-FUNCTION and HASH-FUNCTION.
+
+~a"
+            *hash-and-test-docstring*)
+
+  (multiple-value-bind (test-function hash-function)
+      (normalize-test-and-hash-functions test-function hash-function)
     (%make-dict :size 0
                 :key nil
                 :value nil
                 :child-type nil
                 :hash-function hash-function
                 :test-function test-function)))
+
+(declaim (ftype (function (&key (:test-function (or (and symbol (not keyword) (not boolean))
+                                                    test-function))
+                                (:hash-function (or null
+                                                    (and symbol (not keyword) (not boolean))
+                                                    hash-function)))
+                          (values transient &optional))
+                empty-transient))
+(defun empty-transient (&key test-function hash-function)
+  #.(format nil "Construct an empty `transient' with the provided TEST-FUNCTION and HASH-FUNCTION.
+
+~a"
+            *hash-and-test-docstring*)
+  (multiple-value-bind (test-function hash-function)
+      (normalize-test-and-hash-functions test-function hash-function)
+    (%make-transient :id (get-transient-id)
+                     :size 0
+                     :key nil
+                     :value nil
+                     :child-type nil
+                     :test-function test-function
+                     :hash-function hash-function)))
 
 ;;; Internal iteration facility
 
@@ -2470,3 +2561,264 @@ resulting `dict'."
            (eq (hash-function left) (hash-function right)))
       (union-same-test-and-hash left right merge-function)
       (union-different-test-or-hash left right merge-function)))
+
+;;; Conversions to/from CL mappings
+
+(define-condition convert-overwrite (error)
+  ((%key :initarg :key
+         :accessor convert-overwrite-key)
+   (%old-value :initarg :old-value
+               :accessor convert-overwrite-old-value)
+   (%new-value :initarg :new-value
+               :accessor convert-overwrite-new-value)
+   (%operation :initarg :operation
+               :accessor convert-overwrite-operation)
+   (%source :initarg :source
+            :accessor convert-overwrite-source))
+  (:report (lambda (c s)
+             (format s "Attempt to overwrite in ~s with :ERROR-ON-OVERWRITE T:
+
+Found duplicate mappings for key ~s: ~s and ~s
+in source collection ~s"
+                     (convert-overwrite-operation c)
+                     (convert-overwrite-key c)
+                     (convert-overwrite-old-value c)
+                     (convert-overwrite-new-value c)
+                     (convert-overwrite-source c)))))
+
+(declaim (ftype (function (hash-table
+                           &key (:test-function (or null function-designator test-function))
+                           (:hash-function (or null function-designator hash-function))
+                           (:error-on-overwrite boolean))
+                          (values dict &optional))
+                from-hash-table))
+(defun from-hash-table (hash-table &key test-function hash-function (error-on-overwrite t))
+  #.(format nil "Construct a `dict' containing all the mappings in HASH-TABLE.
+
+If TEST-FUNCTION is unsupplied, the hash-table-test of HASH-TABLE will be used for the resulting `dict', and a
+compatible hash-function will be chosen by the same method as `empty'. Currently, this only works for `equal'
+hash tables, and selects `sxhash' as the hash-function. If TEST-FUNCTION is unsupplied and HASH-TABLE has a
+test other than `equal', an error of class `no-hash-function-for-test' will be signaled.
+
+If supplied, TEST-FUNCTION and HASH-FUNCTION will be used as the resulting `dict's test- and
+hash-functions. If these are different from the hash-table-test of HASH-TABLE, multiple entries from the
+HASH-TABLE may be considered equivalent. In that case:
+
+- Unless :ERROR-ON-OVERWRITE is supplied and nil, if the HASH-TABLE contains multiple keys considered
+  equivalent by the TEST-FUNCTION and HASH-FUNCTION, an error of class `convert-overwrite' will be signaled.
+- If :ERROR-ON-OVERWRITE nil is supplied, one of the entries with equivalent keys will be chosen
+  arbitrarily. The choice is neither random nor deterministic, so users should not depend on its behavior.
+
+~s"
+            *hash-and-test-docstring*)
+  (let* ((transient (empty-transient :test-function (or test-function (hash-table-test hash-table))
+                                     :hash-function hash-function))
+         (merge-function (if error-on-overwrite
+                             (lambda (k o n)
+                               ;; TODO: Bind restarts:
+                               ;; - Use old value.
+                               ;; - Use new value.
+                               ;; - Provide value.
+                               (error 'convert-overwrite
+                                      :key k
+                                      :old-value o
+                                      :new-value n
+                                      :operation 'from-hash-table
+                                      :source hash-table))
+                             #'new-value)))
+    (declare (dynamic-extent merge-function))
+    (iter (declare (declare-variables))
+      (for (key value) in-hashtable hash-table)
+      (insert! transient
+               key value
+               merge-function))
+    (persistent! transient)))
+
+(deftype hash-table-test-name ()
+  '(member eq eql equal equalp))
+
+(define-condition invalid-hash-table-test (error)
+  ((%test :initarg :test
+          :accessor invalid-hash-table-test-test))
+  (:report (lambda (c s)
+             (format s "Cannot construct a HASH-TABLE with :TEST ~s"
+                     (invalid-hash-table-test-test c)))))
+
+(declaim (ftype (function (dict
+                           &key (:test (or null hash-table-test-name function))
+                           (:error-on-overwrite boolean))
+                          (values hash-table &optional))
+                to-hash-table))
+(defun to-hash-table (dict &key test (error-on-overwrite t))
+  "Construct a `hash-table' containing all the mappings in DICT.
+
+If TEST is unsupplied, the resulting `hash-table' will use the test-function of DICT as its test. Currently,
+this only works for `equal' dicts. If TEST is unsupplied and DICT has a test-function other than `equal', an
+error of class `invalid-hash-table-test' will be signaled.
+
+If TEST is supplied, it must be one of the four standard hash-table tests: `eq', `eql', `equal' or
+`equalp'. Symbols or function objects are both acceptable. If a TEST is supplied which is not a standard
+hash-table test, an error of class `invalid-hash-table-test' will be signaled.
+
+If the supplied TEST is different from the test-function of DICT, multiple entries from the DICT may be
+considered equivalent. In that case:
+
+- Unless :ERROR-ON-OVERWRITE is supplied and nil, if the HASH-TABLE contains multiple keys considered
+  equivalent by the TEST-FUNCTION and HASH-FUNCTION, an error of class `convert-overwrite' will be signaled.
+- If :ERROR-ON-OVERWRITE nil is supplied, one of the entries with equivalent keys will be chosen
+  arbitrarily. The choice is neither random nor deterministic, so users should not depend on its behavior."
+  (let* ((test (or test (test-function dict))))
+    (unless (member test (list 'eq 'eql 'equal 'equalp
+                               #'eq #'eql #'equal #'equalp))
+      (error 'invalid-hash-table-test
+             :test test))
+    (let* ((hash-table (make-hash-table :test test
+                                        ;; Aim for a density of 2/3, for no particular reason other than that
+                                        ;; it seems sensible.
+                                        ;; TODO: Choose a target density in a more principled way?
+                                        :size (the (and fixnum unsigned-byte)
+                                                   (ceiling (* (size dict) 1.5))))))
+      (do (key value dict)
+          (when error-on-overwrite
+            (multiple-value-bind (old-value presentp)
+                (gethash key hash-table)
+              ;; TODO: Bind restarts:
+              ;; - Use old value.
+              ;; - Use new value.
+              ;; - Provide value.
+              (when presentp
+                (error 'convert-overwrite
+                       :key key
+                       :old-value old-value
+                       :new-value value
+                       :operation 'to-hash-table
+                       :source dict))))
+        (setf (gethash key hash-table) value))
+      hash-table)))
+
+(declaim (ftype (function (list
+                           &key (:test-function (or null function-designator test-function))
+                           (:hash-function (or null function-designator hash-function))
+                           (:error-on-overwrite boolean))
+                          (values dict &optional))
+                from-alist
+                from-plist))
+(defun from-alist (alist &key test-function hash-function (error-on-overwrite t))
+  #.(format nil "Construct a `dict' containing all the mappings in ALIST.
+
+Because alists are not uniqued collections, ALIST may contain multiple mappings for keys which are equivalent
+under the chosen TEST-FUNCTION and HASH-FUNCTION. In that case:
+
+- Unless :ERROR-ON-OVERWRITE is supplied and nil, an error of class `convert-overwrite' will be signaled.
+- If :ERROR-ON-OVERWRITE nil is supplied, the earliest entry for each key will be selected. This allows
+  `acons' or `push' to \"overwrite\" entries in the ALIST. Note that this behavior differs from
+  `insert-alist', which by default will select the latest entry for each key.
+
+The TEST-FUNCTION and HASH-FUNCTION will be used for the resulting `dict'. They are treated the same way as
+the corresponding arguments to `empty' and `empty-transient'.
+
+~s"
+            *hash-and-test-docstring*)
+  (if (null alist)
+      (empty :test-function test-function
+             :hash-function hash-function)
+
+      (let* ((transient (empty-transient :test-function test-function :hash-function hash-function))
+             (merge-function (if error-on-overwrite
+                                 (lambda (k o n)
+                                   ;; TODO: Bind restarts:
+                                   ;; - Use old value (named continue as the default?).
+                                   ;; - Use new value.
+                                   ;; - Provide value.
+                                   (error 'convert-overwrite
+                                          :key k
+                                          :old-value o
+                                          :new-value n
+                                          :operation 'from-alist
+                                          :source alist))
+
+                                 ;; Prefer earlier entries in the ALIST, so that `acons' and `push' overwrite
+                                 ;; entries.
+                                 #'old-value)))
+        (labels ((insert-pair (list)
+                   (destructuring-bind (entry &rest tail) list
+                     (if (not (and (consp entry)
+                                   (listp tail)))
+                         (error 'malformed-alist
+                                :alist alist
+                                :operation 'from-alist)
+                         (progn
+                           (insert! transient (car entry) (cdr entry) merge-function)
+                           (when tail (insert-pair tail)))))))
+          (insert-pair alist))
+        (persistent! transient))))
+
+(defun from-plist (plist &key test-function hash-function (error-on-overwrite t))
+  #.(format nil "Construct a `dict' containing all the mappings in PLIST.
+
+Because plists are not uniqued collections, PLIST may contain multiple mappings for keys which are equivalent
+under the chosen TEST-FUNCTION and HASH-FUNCTION. In that case:
+
+- Unless :ERROR-ON-OVERWRITE is supplied and nil, an error of class `convert-overwrite' will be signaled.
+- If :ERROR-ON-OVERWRITE nil is supplied, the earliest entry for each key will be selected. This allows
+  `list*' or `push' to \"overwrite\" entries in the PLIST. Note that this behavior differs from
+  `insert-plist', which by default will select the latest entry for each key.
+
+The TEST-FUNCTION and HASH-FUNCTION will be used for the resulting `dict'. They are treated the same way as
+the corresponding arguments to `empty' and `empty-transient'.
+
+~s"
+            *hash-and-test-docstring*)
+  (if (null plist)
+      (empty :test-function test-function
+             :hash-function hash-function)
+
+      (let* ((transient (empty-transient :test-function test-function :hash-function hash-function))
+             (merge-function (if error-on-overwrite
+                                 (lambda (k o n)
+                                   ;; TODO: Bind restarts:
+                                   ;; - Use old value (named continue as the default?).
+                                   ;; - Use new value.
+                                   ;; - Provide value.
+                                   (error 'convert-on-overwrite
+                                          :key k
+                                          :old-value o
+                                          :new-value n
+                                          :operation 'from-plist
+                                          :source plist))
+
+                                 ;; Prefer earlier entries in the PLIST, so that `list*' and `push' overwrite
+                                 ;; entries.
+                                 #'old-value)))
+        (labels ((insert-pair (list)
+                   (if (not (and (consp list)
+                                 (consp (rest list))))
+                       (error 'malformed-plist
+                              :plist plist
+                              :operation 'from-plist)
+                       (destructuring-bind (key value &rest tail) list
+                         (insert! transient key value merge-function)
+                         (when tail (insert-pair tail))))))
+          (insert-pair plist))
+        (persistent! transient))))
+
+(declaim (ftype (function (dict) (values list &optional))
+                to-alist
+                to-plist))
+(defun to-alist (dict)
+  "Construct an alist containing each of the mappings in DICT.
+
+The entries from DICT will appear in the resulting alist in an arbitrary order."
+  (let* ((alist nil))
+    (do (key value dict)
+        (push (cons key value) alist))
+    alist))
+
+(defun to-plist (dict)
+  "Construct a plist containing each of the mappings in DICT.
+
+The entries from DICT will appear in the resulting plist in an arbitrary order."
+  (let* ((plist nil))
+    (do (key value dict)
+        (setf plist (list* key value plist)))
+    plist))

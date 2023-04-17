@@ -112,8 +112,22 @@ shadow CL symbols liberally to accomplish this.
   - [x] optimize node definitions to store key/value pairs inline.
     - [ ] convenient internal iterators over the children of a `hash-node` or `conflict-node`?
   - [x] internal iteration facility
-  - [ ] convert from CL collections - `from-hash-table`, `from-alist`?
-  - [ ] convert to CL collections - `to-hash-table`, `to-alist`?
+  - [ ] convert from CL collections
+    - [x] `from-hash-table`
+      - [ ] test behavior with `:convert-overwrite t`
+      - [ ] test behavior with `:convert-overwrite nil`
+    - [x] `from-alist`
+      - [ ] test behavior with `:convert-overwrite t`
+      - [ ] test behavior with `:convert-overwrite nil`
+    - [x] `from-plist`
+      - [ ] test basic behavior
+      - [ ] test behavior with `:convert-overwrite t`
+      - [ ] test behavior with `:convert-overwrite nil`
+  - [ ] convert to CL collections
+    - [x] `to-hash-table`
+    - [x] `to-alist`
+    - [x] `to-plist`
+      - [ ] test basic behavior
   - [x] convenient constructor - `dict`
   - [x] insert one pair
     - [x] tests

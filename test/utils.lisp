@@ -41,6 +41,8 @@
 
    #:gen-array
 
+   #:gen-alist
+
    #:signals-with))
 (in-package :immutable/test/utils)
 
@@ -226,6 +228,13 @@ printing a large number of dots to *TEST-DRIBBLE*."
               (funcall elements)))
       this)))
 
+(defun gen-alist (&key (length (gen-integer :min 16 :max 128))
+                    (keys #'gensym)
+                    (values *gen-fixnum*))
+  (gen-list :length length
+            :elements (lambda ()
+                        (cons (funcall keys) (funcall values)))))
+
 (defmacro signals-with ((condition-class &rest readers-and-expected-values) &body body)
   (flet ((assert-slot-matches (reader-and-expected-value)
            (destructuring-bind (test expected-value reader) reader-and-expected-value
@@ -243,4 +252,4 @@ Executing ~s was expected to signal an error of class ~s, but instead it signale
 
 Executing ~s was expected to signal an error of class ~s, but instead it returned normally. Return values were: ~s"
 
-               ',condition-class '(progn ,@body) c)))))
+               ',condition-class '(progn ,@body) ',condition-class c)))))
