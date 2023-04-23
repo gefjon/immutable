@@ -156,7 +156,9 @@ shadow CL symbols liberally to accomplish this.
     - [x] `do` - macro analogous to `dolist`
     - [ ] `iterate` integration?
   - [ ] equality testing
-  - [ ] change hash and test function of `dict` - `rehash`
+  - [ ] `rehash` - change hash and test function of `dict`
+    - [x] implementation
+    - [ ] tests
   - [ ] hashing?
   - [x] transients
     - [x] representation for transient ids

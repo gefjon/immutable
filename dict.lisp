@@ -23,28 +23,28 @@
                 #:unsigned-fixnum)
   (:export
 
-   ;; type definitions
+   ;; Type definitions.
    #:dict
    #:transient
 
-   ;; converting between dicts and transients
+   ;; Converting between dicts and transients.
    #:transient #:persistent!
 
-   ;; stale transient error
+   ;; Stale transient error, when attempting to mutate a transient that has already been made `persistent!'.
    #:stale-transient
    #:stale-transient-operation
    #:stale-transient-transient
 
-   ;; unknown hash function error
+   ;; Unknown hash function error.
    #:no-hash-function-for-test
    #:no-hash-function-for-test-function
    #:no-hash-function-for-test-known-hash-functions
 
-   ;; invalid hash table test error, for `to-hash-table'
+   ;; Invalid hash table test error, for `to-hash-table'.
    #:invalid-hash-table-test
    #:invalid-hash-table-test-test
 
-   ;; malformed plist and alist errors, for `from-alist', `insert-alist' and plist equivalents
+   ;; Malformed plist and alist errors, for `from-alist', `insert-alist' and plist equivalents.
    #:malformed-plist
    #:malformed-plist-plist
    #:malformed-plist-operator
@@ -53,7 +53,7 @@
    #:malformed-alist-alist
    #:malformed-alist-operator
 
-   ;; error when converting a collection would cause a collision due to different hash/test functions
+   ;; Error when converting a collection would cause a collision due to different hash/test functions.
    #:convert-overwrite
    #:convert-overwrite-key
    #:convert-overwrite-old-value
@@ -61,42 +61,54 @@
    #:convert-overwrite-operation
    #:convert-overwrite-source
 
-   ;; reading properties of dicts and transients
+   ;; Error on unexpected conflict during rehashes.
+   #:rehash-conflict
+   #:rehash-conflict-key
+   #:rehash-conflict-value-1
+   #:rehash-conflict-value-2
+   #:rehash-conflict-source
+   #:rehash-conflict-new-test-function
+   #:rehash-conflict-new-hash-function
+
+   ;; Reading properties of dicts and transients.
    #:size #:test-function #:hash-function
 
-   ;; Registering new test-function/hash-function pairs
+   ;; Registering new test-function/hash-function pairs.
    #:define-test-hash-function
 
-   ;; GETHASH analogue
+   ;; GETHASH analogue.
    #:get
 
-   ;; (SETF GETHASH) analogue
+   ;; (SETF GETHASH) analogue.
    #:insert #:insert!
 
-   ;; Specifying the behavior of insertion when a dict already contains a mapping for the given key
+   ;; Specifying the behavior of insertion when a dict already contains a mapping for the given key.
    #:merge-function #:new-value #:old-value
 
-   ;; REMHASH analogue
+   ;; REMHASH analogue.
    #:remove #:remove!
 
-   ;; MAKE-HASH-TABLE analogue to construct an empty dict
+   ;; MAKE-HASH-TABLE analogue to construct an empty dict.
    #:empty #:empty-transient
 
-   ;; Batched insertions and removals
+   ;; Batched insertions and removals.
    #:insert-plist
    #:insert-alist
    #:insert-multiple
    #:remove-multiple
 
-   ;; Iteration over dicts
+   ;; Iteration over dicts.
    #:for-each
    #:map-values
    #:do
 
-   ;; Combining dicts
+   ;; Combining dicts.
    #:union
 
-   ;; Converting to/from CL mapping collections
+   ;; Changing hash and test function of a dict.
+   #:rehash
+
+   ;; Converting to/from CL mapping collections.
    #:from-hash-table #:to-hash-table
    #:from-alist #:to-alist
    #:from-plist #:to-plist))
@@ -1748,12 +1760,18 @@ IMMUTABLE/DICT can only automatically deduce :HASH-FUNCTIONs when the :TEST-FUNC
              :known-test-hash-functions *test-hash-functions*))
     hash-function))
 
-(declaim (ftype (function ((or null
-                               (and symbol (not keyword) (not boolean))
-                               test-function)
-                           (or null
-                               (and symbol (not keyword) (not boolean))
-                               hash-function))
+(deftype test-function-designator ()
+  '(or null
+    (and symbol (not keyword) (not boolean))
+    test-function))
+
+(deftype hash-function-designator ()
+  '(or null
+    (and symbol (not keyword) (not boolean))
+    hash-function))
+
+(declaim (ftype (function (test-function-designator
+                           hash-function-designator)
                           (values test-function hash-function &optional))
                 normalize-test-and-hash-functions))
 (defun normalize-test-and-hash-functions (test hash)
@@ -1787,11 +1805,8 @@ If not supplied, TEST-FUNCTION defaults to `immutable/hash:==', and HASH-FUNCTIO
     ;; TODO: add to docstring: automatically generated listing of *TEST-HASH-FUNCTIONS*.
     ))
 
-(declaim (ftype (function (&key (:test-function (or (and symbol (not keyword) (not boolean))
-                                                    test-function))
-                                (:hash-function (or null
-                                                    (and symbol (not keyword) (not boolean))
-                                                    hash-function)))
+(declaim (ftype (function (&key (:test-function test-function-designator)
+                                (:hash-function hash-function-designator))
                           (values dict &optional))
                 empty))
 (defun empty (&key test-function
@@ -1810,11 +1825,8 @@ If not supplied, TEST-FUNCTION defaults to `immutable/hash:==', and HASH-FUNCTIO
                 :hash-function hash-function
                 :test-function test-function)))
 
-(declaim (ftype (function (&key (:test-function (or (and symbol (not keyword) (not boolean))
-                                                    test-function))
-                                (:hash-function (or null
-                                                    (and symbol (not keyword) (not boolean))
-                                                    hash-function)))
+(declaim (ftype (function (&key (:test-function test-function-designator)
+                                (:hash-function hash-function-designator))
                           (values transient &optional))
                 empty-transient))
 (defun empty-transient (&key test-function hash-function)
@@ -2562,6 +2574,100 @@ resulting `dict'."
       (union-same-test-and-hash left right merge-function)
       (union-different-test-or-hash left right merge-function)))
 
+;;; REHASH to change the hash and test function of a dict
+
+(define-condition rehash-conflict (error)
+  ((%key :initarg :key
+         :accessor rehash-conflict-key)
+   (%value-1 :initarg :value-1
+             :accessor rehash-conflict-value-1)
+   (%value-2 :initarg :value-2
+             :accessor rehash-conflict-value-2)
+   (%source :initarg :source
+            :accessor rehash-conflict-source)
+   (%new-test-function :initarg :new-test-function
+                       :accessor rehash-conflict-new-test-function)
+   (%new-hash-function :initarg :new-hash-function
+                       :accessor rehash-conflict-new-hash-function))
+  (:report (lambda (c s)
+             (format s "Rehash introduces conflict on key ~s with values ~s and ~s
+
+Rehashing the dict:
+  ~s
+from
+  :TEST-FUNCTION ~s
+  :HASH-FUNCTION ~s
+to
+  :TEST-FUNCTION ~s
+  :HASH-FUNCTION ~s
+causes a conflict between two entries with keys equivalent to
+  ~s
+with values
+  ~s
+  ~s"
+                     (rehash-conflict-key c)
+                     (rehash-conflict-value-1 c)
+                     (rehash-conflict-value-2 c)
+                     (rehash-conflict-source c)
+                     (test-function (rehash-conflict-source c))
+                     (hash-function (rehash-conflict-source c))
+                     (rehash-conflict-new-test-function c)
+                     (rehash-conflict-new-hash-function c)
+                     (rehash-conflict-key c)
+                     (rehash-conflict-value-1 c)
+                     (rehash-conflict-value-2 c)))))
+
+(declaim (ftype (function (dict test-function hash-function t t t) nil)
+                error-rehash-conflict))
+(defun error-rehash-conflict (source new-test-function new-hash-function key value-1 value-2)
+  ;; TODO: Bind restarts.
+  (error 'rehash-conflict
+         :key key
+         :value-1 value-1
+         :value-2 value-2
+         :source source
+         :new-test-function new-test-function
+         :new-hash-function new-hash-function))
+
+(declaim (ftype (function (dict &key (:test-function test-function-designator)
+                                (:hash-function hash-function-designator)
+                                (:merge-function merge-function))
+                          (values dict &optional))
+                rehash))
+(defun rehash (dict &key test-function
+                      hash-function
+                      merge-function)
+  #.(format nil "Create a new `dict' containing all the mappings from DICT, but with new a new TEST-FUNCTION and HASH-FUNCTION.
+
+If the new TEST-FUNCTION and HASH-FUNCTION treat multiple keys from DICT as equivalent which are not
+equivalent under the original test-function and hash-function of DICT, the MERGE-FUNCTION will be called to
+combine the values of the conflicting entries. If more than two entries conflict, the MERGE-FUNCTION will be
+called multiple times, in a manner similar to `cl:reduce'. The order in which conflicting entries are passed
+to the MERGE-FUNCTION is neither random nor deterministic, so users should not depend on it. As a result,
+MERGE-FUNCTIONs should be associative.
+
+The default MERGE-FUNCTION signals an error of class `rehash-conflict'.
+
+The TEST-FUNCTION and HASH-FUNCTION will be used for the resulting `dict'. They are treated the same way as
+the corresponding arguments to `empty' and `empty-transient'.
+
+~s"
+            *hash-and-test-docstring*)
+  (let* ((transient (empty-transient :test-function test-function
+                                     :hash-function hash-function))
+
+         ;; Read the test- and hash-functions back out of the TRANSIENT for error reporting now that they've
+         ;; been normalized.
+         (test (test-function transient))
+         (hash (hash-function transient))
+         (merge-function (or merge-function
+                             (lambda (k o n)
+                               (error-rehash-conflict dict test hash k o n)))))
+    (declare (dynamic-extent merge-function))
+    (do (key value dict)
+        (insert! transient key value merge-function))
+    (persistent! transient)))
+
 ;;; Conversions to/from CL mappings
 
 (define-condition convert-overwrite (error)
@@ -2587,8 +2693,8 @@ in source collection ~s"
                      (convert-overwrite-source c)))))
 
 (declaim (ftype (function (hash-table
-                           &key (:test-function (or null function-designator test-function))
-                           (:hash-function (or null function-designator hash-function))
+                           &key (:test-function test-function-designator)
+                           (:hash-function hash-function-designator)
                            (:error-on-overwrite boolean))
                           (values dict &optional))
                 from-hash-table))
@@ -2697,8 +2803,10 @@ considered equivalent. In that case:
       hash-table)))
 
 (declaim (ftype (function (list
-                           &key (:test-function (or null function-designator test-function))
-                           (:hash-function (or null function-designator hash-function))
+                           &key (:test-function test-function-designator)
+                           (:hash-function hash-function-designator)
+                           ;; TODO: Consider accepting a :MERGE-FUNCTION instead of an :ERROR-ON-OVERWRITE
+                           ;;       flag.
                            (:error-on-overwrite boolean))
                           (values dict &optional))
                 from-alist
