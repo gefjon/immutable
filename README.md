@@ -24,6 +24,7 @@ shadow CL symbols liberally to accomplish this.
   - [x] indexing - `ref`
   - [x] examine length - `length`
     - [x] `emptyp`
+  - [x] rewrite various operators to not use generators where unnecessary
   - [x] internal iteration facility - `generate-vec`
   - [x] convert from CL sequences - `from-list` and `from-vector`
   - [x] convert to CL sequences - `to-list` and `to-vector`
